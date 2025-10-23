@@ -65,20 +65,28 @@ class Network(nn.Module):
         return len(self.model)
 
 
-def calculate_lyapunov_spectrum(linear_network, x_data, nle):
+def calculate_lyapunov_spectrum(linear_network, x_data, nle, n_random_samples: int = None):
     ONSstep = 1
 
-    x = torch.zeros_like(x_data, requires_grad=True, **linear_network.factory_kwargs)
+    x = x_data.clone()
 
-    Q, R = torch.linalg.qr(torch.randn(linear_network.Nin, nle, **linear_network.factory_kwargs))
-    ls = torch.zeros(nle, dtype=torch.float32, device=linear_network.device)
+    if n_random_samples:
+        random_sample_indices = torch.randperm(x.shape[0])[:n_random_samples]
+        x = x[random_sample_indices]
+
+    x.requires_grad = True
+
+    batch_size = x.shape[0]
+
+    Q, R = torch.linalg.qr(torch.randn(*x.shape, nle, **linear_network.factory_kwargs))
+    ls = torch.zeros(batch_size, nle, dtype=torch.float32, device=linear_network.device)
 
     for step, layer in enumerate(linear_network.model):
         layer_out = layer(x)
 
         # D = torch.autograd.grad([layer_out.sum()], x, retain_graph=True)[0]
         # D = torch.func.jacrev(layer, x)
-        D = torch.func.jacfwd(layer)(x[0])
+        D = torch.func.vmap(torch.func.jacfwd(layer))(x)
         # print(x.shape, layer_out.shape, D.shape)
 
         x = layer_out
@@ -87,7 +95,7 @@ def calculate_lyapunov_spectrum(linear_network, x_data, nle):
 
         if step % ONSstep == 0 and nle > 0:
             Q, R = torch.linalg.qr(Q)
-            ls += torch.log(torch.abs(torch.diag(R))) / ONSstep
+            ls += torch.log(torch.abs(torch.diagonal(R, dim1=-2, dim2=-1))) / ONSstep
 
     return ls
 
@@ -128,8 +136,8 @@ if __name__ == '__main__':
     # Set up the initial plot
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
 
-    lyapunov_spectrum_initial = calculate_lyapunov_spectrum(linear_network, x_data,
-                                                            nle).detach().cpu().numpy()
+    lyapunov_spectrum_initial = calculate_lyapunov_spectrum(linear_network, x_data, nle,
+                                                            n_random_samples=num_sample_trajectories).numpy(force=True)
     ax1.plot(lyapunov_spectrum_initial, "r", label="Lyapunov spectrum before flossing")
     ax1.legend()
 
@@ -137,7 +145,8 @@ if __name__ == '__main__':
     for epoch in range(Ef):
         optimizer.zero_grad()
 
-        lyapunov_spectrum = calculate_lyapunov_spectrum(linear_network, x_data[len(x_data) // 2:], nle)
+        lyapunov_spectrum = calculate_lyapunov_spectrum(linear_network, x_data, nle,
+                                                        n_random_samples=num_sample_trajectories)
 
         # Calculate the loss (mean square of the first nle Lyapunov exponents)
         loss = torch.mean(lyapunov_spectrum ** 2)
@@ -158,7 +167,7 @@ if __name__ == '__main__':
 
     lyapunov_spectra = np.array(lyapunov_spectra)
 
-    ax1.plot(np.arange(len(lyapunov_spectra)), lyapunov_spectra, "k")
+    ax1.plot(np.arange(len(lyapunov_spectra)), lyapunov_spectra.reshape(-1, nle), "k")
     ax1.set_xlabel(r"Index $i$")
     ax1.set_ylabel(r"Lyapunov Exponent $\lambda_i$ (1/step)")
     ax1.legend()
