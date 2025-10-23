@@ -1,5 +1,6 @@
 import random
 
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -111,7 +112,7 @@ if __name__ == '__main__':
     n_hidden = 10
     Nout = 14
     nle = 16  # the maximum number of Lyapunov exponents to floss
-    Ef = 350  # number of flossing epochs
+    Ef = 200  # number of flossing epochs
 
     num_sample_trajectories = 300  # Number of sample trajectories to compute the Lyapunov exponents on ( depends on available GPU resources )
 
@@ -138,8 +139,6 @@ if __name__ == '__main__':
 
     lyapunov_spectrum_initial = calculate_lyapunov_spectrum(linear_network, x_data, nle,
                                                             n_random_samples=num_sample_trajectories).numpy(force=True)
-    ax1.plot(lyapunov_spectrum_initial, "r", label="Lyapunov spectrum before flossing")
-    ax1.legend()
 
     # Training loop
     for epoch in range(Ef):
@@ -167,10 +166,22 @@ if __name__ == '__main__':
 
     lyapunov_spectra = np.array(lyapunov_spectra)
 
-    ax1.plot(np.arange(len(lyapunov_spectra)), lyapunov_spectra.reshape(-1, nle), "k")
+    le_mean = lyapunov_spectra.mean(axis=1)
+    le_std = lyapunov_spectra.std(axis=1)
+    le_x = np.arange(len(lyapunov_spectra))
+
+    fills = [ax1.fill_between(le_x, le_mean[:, i] - le_std[:, i], le_mean[:, i] + le_std[:, i], alpha=0.2) for i in
+             range(nle)]
+    lines = ax1.plot(le_x, le_mean)
+
+    for fill, line in zip(fills, lines):
+        color = line.get_color()
+
+        color = mcolors.to_rgb(color)
+        fill.set_color(color)
+
     ax1.set_xlabel(r"Index $i$")
     ax1.set_ylabel(r"Lyapunov Exponent $\lambda_i$ (1/step)")
-    ax1.legend()
 
     ax2.semilogy(list(range(len(losses))), losses, "r", label="Loss")
     ax2.set_xlabel("Epoch")
