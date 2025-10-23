@@ -1,7 +1,8 @@
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torch.optim as optim
-import numpy as np
-import matplotlib.pyplot as plt
+
 
 class VanillaRNN(torch.nn.Module):
     def __init__(self, Nin, N, Nout):
@@ -18,10 +19,12 @@ class VanillaRNN(torch.nn.Module):
         y = self.W_out @ h + self.b_out
         return h, y
 
+
 def calculate_jacobian_analytical(vanilla_rnn, h):
-    tanh_prime = 1 / torch.cosh(h)**2
+    tanh_prime = 1 / torch.cosh(h) ** 2
     jacobian = vanilla_rnn.W_h @ torch.diag(tanh_prime)
     return jacobian
+
 
 def calculate_lyapunov_spectrum(vanilla_rnn, x_data, nle, seedIC=1, seedONS=1):
     n = vanilla_rnn.N
@@ -46,6 +49,7 @@ def calculate_lyapunov_spectrum(vanilla_rnn, x_data, nle, seedIC=1, seedONS=1):
             ls += torch.log(torch.abs(torch.diag(R))) / ONSstep
 
     return ls
+
 
 if __name__ == '__main__':
 
