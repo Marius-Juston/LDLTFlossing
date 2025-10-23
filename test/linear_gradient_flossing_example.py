@@ -7,6 +7,8 @@ import torch
 import torch.optim as optim
 from torch import nn
 
+DPI = 600
+
 
 def set_seed(seed):
     torch.manual_seed(seed)
@@ -66,9 +68,8 @@ class Network(nn.Module):
         return len(self.model)
 
 
-def calculate_lyapunov_spectrum(linear_network, x_data, nle, n_random_samples: int = None):
-    ONSstep = 1
-
+def calculate_lyapunov_spectrum(linear_network, x_data, nle, n_random_samples: int = None,
+                                normalization_frequency: int = 1):
     x = x_data.clone()
 
     if n_random_samples:
@@ -85,18 +86,16 @@ def calculate_lyapunov_spectrum(linear_network, x_data, nle, n_random_samples: i
     for step, layer in enumerate(linear_network.model):
         layer_out = layer(x)
 
-        # D = torch.autograd.grad([layer_out.sum()], x, retain_graph=True)[0]
-        # D = torch.func.jacrev(layer, x)
+        # FIXME: Very inefficient, but ¯\_(ツ)_/¯
         D = torch.func.vmap(torch.func.jacfwd(layer))(x)
-        # print(x.shape, layer_out.shape, D.shape)
 
         x = layer_out
 
         Q = D @ Q
 
-        if step % ONSstep == 0 and nle > 0:
+        if step % normalization_frequency == 0 and nle > 0:
             Q, R = torch.linalg.qr(Q)
-            ls += torch.log(torch.abs(torch.diagonal(R, dim1=-2, dim2=-1))) / ONSstep
+            ls += torch.log(torch.abs(torch.diagonal(R, dim1=-2, dim2=-1))) / normalization_frequency
 
     return ls
 
@@ -112,11 +111,11 @@ if __name__ == '__main__':
     n_hidden = 10
     Nout = 14
     nle = 16  # the maximum number of Lyapunov exponents to floss
-    Ef = 200  # number of flossing epochs
+    Ef = 350  # number of flossing epochs
 
     num_sample_trajectories = 300  # Number of sample trajectories to compute the Lyapunov exponents on ( depends on available GPU resources )
 
-    # Initialize the RNN
+    # Initialize the Neural Network
     linear_network = Network(Nin, n_hidden, hidden_dim, Nout, device=device)
     optimizer = optim.Adam(linear_network.parameters())
 
@@ -134,11 +133,15 @@ if __name__ == '__main__':
     losses = []
     lyapunov_spectra = []
 
-    # Set up the initial plot
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
-
     lyapunov_spectrum_initial = calculate_lyapunov_spectrum(linear_network, x_data, nle,
                                                             n_random_samples=num_sample_trajectories).numpy(force=True)
+
+    criteria = nn.MSELoss()
+
+    # Can technically make it so that for the specific Lyapunov exponent is what you want it to be
+    target_le = torch.zeros(nle, **linear_network.factory_kwargs)
+
+    target_le = target_le.unsqueeze(0).repeat((num_sample_trajectories, 1))
 
     # Training loop
     for epoch in range(Ef):
@@ -148,7 +151,7 @@ if __name__ == '__main__':
                                                         n_random_samples=num_sample_trajectories)
 
         # Calculate the loss (mean square of the first nle Lyapunov exponents)
-        loss = torch.mean(lyapunov_spectrum ** 2)
+        loss = criteria(lyapunov_spectrum, target_le)
         print(f"Epoch {epoch}: Loss = {loss.item()}")
 
         # Backward pass: compute gradients
@@ -170,9 +173,14 @@ if __name__ == '__main__':
     le_std = lyapunov_spectra.std(axis=1)
     le_x = np.arange(len(lyapunov_spectra))
 
-    fills = [ax1.fill_between(le_x, le_mean[:, i] - le_std[:, i], le_mean[:, i] + le_std[:, i], alpha=0.2) for i in
+    fig_size = (5, 5)
+
+    # Set up the initial plot
+    fig, ax = plt.subplots(figsize=fig_size)
+
+    fills = [ax.fill_between(le_x, le_mean[:, i] - le_std[:, i], le_mean[:, i] + le_std[:, i], alpha=0.2) for i in
              range(nle)]
-    lines = ax1.plot(le_x, le_mean)
+    lines = ax.plot(le_x, le_mean)
 
     for fill, line in zip(fills, lines):
         color = line.get_color()
@@ -180,15 +188,27 @@ if __name__ == '__main__':
         color = mcolors.to_rgb(color)
         fill.set_color(color)
 
-    ax1.set_xlabel(r"Index $i$")
-    ax1.set_ylabel(r"Lyapunov Exponent $\lambda_i$ (1/step)")
+    ax.set_xlabel(r"Index $i$")
+    ax.set_ylabel(r"Lyapunov Exponent $\lambda_i$ (1/step)")
+    ax.set_title(f"Lyapunov Exponent ($k = {nle}$) over Epochs")
+    ax.set_xlim(xmin=0, xmax=len(lyapunov_spectra) + 1)
 
-    ax2.semilogy(list(range(len(losses))), losses, "r", label="Loss")
-    ax2.set_xlabel("Epoch")
-    ax2.set_ylabel("Loss")
-    ax2.set_title("Loss over Epochs")
-    ax2.legend()
+    fig.tight_layout()
 
-    fig.savefig('Temp.png')
+    fig.savefig('LinearGradientFlossing_exponents.png', dpi=DPI)
+
+    fig, ax = plt.subplots(figsize=fig_size)
+
+    ax.semilogy(list(range(len(losses))), losses, "r", label="Loss")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Loss")
+    ax.set_title("Loss over Epochs")
+    ax.set_xlim(xmin=0, xmax=len(losses) + 1)
+
+    ax.legend()
+
+    fig.tight_layout()
+
+    fig.savefig('LinearGradientFlossing_loss.png', dpi=DPI)
 
     print("Flossing complete.")
