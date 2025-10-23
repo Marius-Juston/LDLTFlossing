@@ -1,3 +1,5 @@
+# Code provided by Rainer Engelken, 2025
+
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
