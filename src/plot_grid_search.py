@@ -36,10 +36,10 @@ def load_grid_results(base_dir='../runs/grid_search'):
 
 def plot_grid_results(df, save_path='../runs/grid_search/summary_plot.png', dpi=600):
     # Create a pivot table (rows=L, cols=hidden)
-    pivot = df.pivot(index='L', columns='hidden', values='best_loss')
+    pivot = df.pivot(index='hidden', columns='L', values='best_loss')
 
     plt.figure(figsize=(6, 4))
-    sns.set_context("paper", font_scale=1.4)
+    sns.set_context("paper")
     sns.heatmap(
         pivot,
         annot=True,
@@ -48,9 +48,9 @@ def plot_grid_results(df, save_path='../runs/grid_search/summary_plot.png', dpi=
         cbar_kws={'label': 'Best Training Loss'},
         linewidths=0.5,
     )
-    plt.xlabel("Hidden Layer Size")
-    plt.ylabel("Number of Layers (L)")
-    plt.title("Grid Search: Deep Lipschitz ResNet Performance")
+    plt.xlabel("Number of Layers (L)")
+    plt.ylabel("Hidden Layer Size")
+    plt.title("Deep Lipschitz ResNet Performance")
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=dpi, bbox_inches='tight')
