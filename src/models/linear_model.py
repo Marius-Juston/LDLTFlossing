@@ -242,3 +242,56 @@ class DeepLipschitzSequential(nn.Module):
                 prev_alpha = layer.alpha
 
         return W
+
+    def calculate_lyapunov_spectrum(self, x_data, nle, n_random_samples: int = None,
+                                    normalization_frequency: int = None):
+
+        if normalization_frequency is None:
+            # Normalize only once at the end
+            normalization_frequency = len(self.layers) - 1
+
+        x = x_data.clone()
+
+        if n_random_samples and n_random_samples > x.shape[0]:
+            random_sample_indices = torch.randperm(x.shape[0])[:n_random_samples]
+            x = x[random_sample_indices]
+
+        x.requires_grad = True
+
+        batch_size = x.shape[0]
+
+        Q, R = torch.linalg.qr(torch.randn(*x.shape, nle, **self.factory_kwargs))
+        ls = torch.zeros(batch_size, nle, dtype=torch.float32, device=self.device)
+
+        current_input = x
+        d_sqrt = self.lipschitz_constant * self.layers[0].identity
+        prev_alpha = torch.tensor(1.0, **self.factory_kwargs)
+        prev_const = torch.tensor(1.0, **self.factory_kwargs)
+
+        for step, layer in enumerate(self.layers):
+            if isinstance(layer, nn.Dropout):
+                layer_out = layer(current_input)
+
+                # FIXME: Very inefficient, but ¯\_(ツ)_/¯
+                D = torch.func.vmap(torch.func.jacfwd(layer))(current_input)
+            else:
+                layer: LinearLipschitz
+
+                # FIXME: Very inefficient, but ¯\_(ツ)_/¯
+                D, _ , _ = torch.func.vmap(torch.func.jacfwd(layer),
+                                    in_dims=(0, None, None, None))(current_input, d_sqrt, prev_alpha, prev_const)
+
+                layer_out, d_sqrt, _ = layer(current_input, d_sqrt, prev_alpha, prev_const)
+
+                prev_const = layer.constant
+                prev_alpha = layer.alpha
+
+            current_input = layer_out
+
+            Q = D @ Q
+
+            if step % normalization_frequency == 0 and nle > 0:
+                Q, R = torch.linalg.qr(Q)
+                ls += torch.log(torch.abs(torch.diagonal(R, dim1=-2, dim2=-1))) / normalization_frequency
+
+        return ls, current_input

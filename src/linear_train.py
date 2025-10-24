@@ -1,6 +1,7 @@
+import dataclasses
 import os
 from datetime import datetime
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 from matplotlib import pyplot as plt
@@ -47,9 +48,24 @@ def alpha_values(model: DeepLipschitzLinearResNet) -> Dict[str, float]:
     return output
 
 
-def train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_index, tb_writer, logging_frequency=100):
+@dataclasses.dataclass()
+class FlossingConfig:
+    enabled: bool = False
+    flossing_frequency: Optional[int] = None
+    flossing_le: int = 1
+    num_sample_trajectories: int = 300
+    weight: float = 0.05
+
+
+def train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_index, tb_writer, flossing_config: FlossingConfig,
+                    logging_frequency=100):
     running_loss = 0.
     last_loss = 0.
+
+    running_output_loss = 0.
+    running_flossing_loss = 0.
+
+    running_max_le = None
 
     # Here, we use enumerate(training_loader) instead of
     # iter(training_loader) so that we can track the batch
@@ -65,11 +81,32 @@ def train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_index, tb_
         # Zero your gradients for every batch!
         optimizer.zero_grad(set_to_none=True)
 
-        # Make predictions for this batch
-        outputs = model(inputs)
+        if flossing_config.enabled:
+            # FIXME gradient issue with this and the forward function, disabling training
+            le, outputs = model.calculate_lyapunov_spectrum(inputs, nle=flossing_config.flossing_le,
+                                                            n_random_samples=flossing_config.num_sample_trajectories,
+                                                            normalization_frequency=flossing_config.flossing_frequency)
 
-        # Compute the loss and its gradients
-        loss = loss_fn(outputs, labels)
+            if running_max_le is None:
+                running_max_le = le.max().item()
+            else:
+                running_max_le = max(running_max_le, le.max().item())
+
+            flossing_loss = torch.square(le).mean()
+
+            output_loss = loss_fn(outputs, labels)
+
+            if flossing_config.weight > 0:
+                loss = flossing_config.weight * flossing_loss + output_loss
+            else:
+                loss = output_loss
+        else:
+            # Make predictions for this batch
+            outputs = model(inputs)
+
+            # Compute the loss and its gradients
+            loss = loss_fn(outputs, labels)
+
         loss.backward()
 
         # Adjust learning weights
@@ -79,13 +116,38 @@ def train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_index, tb_
         # Gather data and report
         running_loss += loss.item()
 
+        if flossing_config.enabled:
+            running_output_loss += output_loss.item()
+            running_flossing_loss += flossing_loss.item()
+        else:
+            running_output_loss += loss.item()
+
         # print("Current loss:", loss.item())
         if i % logging_frequency == logging_frequency - 1:
             last_loss = running_loss / logging_frequency  # loss per batch
-            print('  batch {} loss: {}'.format(i + 1, last_loss))
+
             tb_x = epoch_index * len(training_loader) + i + 1
             tb_writer.add_scalar('Loss/Train', last_loss, tb_x)
+
+            last_output_loss = running_output_loss / logging_frequency
+
+            if flossing_config.enabled:
+                last_flossing_loss = running_flossing_loss / logging_frequency
+
+                tb_writer.add_scalar('Loss/Flossing', last_flossing_loss, tb_x)
+                tb_writer.add_scalar('Loss/Flossing MAx', running_max_le, tb_x)
+
+                print('  batch {} loss: {} flossing (max: {}): {} output: {}'.format(i + 1, last_loss, running_max_le, last_flossing_loss, last_output_loss))
+
+            else:
+                print('  batch {} loss: {}'.format(i + 1, last_loss))
+
+            tb_writer.add_scalar('Loss/Output', last_output_loss, tb_x)
+
+            running_max_le = None
             running_loss = 0.
+            running_flossing_loss = 0.0
+            running_output_loss = 0.0
 
             if hasattr(model, 'A'):
                 alpha_vals = alpha_values(model)
@@ -95,8 +157,12 @@ def train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_index, tb_
     return last_loss
 
 
-def train(x, y, model: DeepLipschitzLinearResNet, learning_prefix='sine', batch_size=64, lr=1e-3,
+def train(x, y, model: DeepLipschitzLinearResNet, flossing_config: Optional[FlossingConfig] = None,
+          learning_prefix='sine', batch_size=64, lr=1e-3,
           termination_error=5e-3, epochs=100, theoretical_lower=0, logging_frequency=100):
+    if flossing_config is None:
+        flossing_config = FlossingConfig(enabled=False)
+
     # Initializing in a separate cell so we can easily add more epochs to the same run
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     save_folder = f'../runs/{learning_prefix}_trainer_{timestamp}'
@@ -127,7 +193,7 @@ def train(x, y, model: DeepLipschitzLinearResNet, learning_prefix='sine', batch_
 
         # Make sure gradient tracking is on, and do a pass over the data
         model.train(True)
-        avg_loss = train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_number, writer,
+        avg_loss = train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_number, writer, flossing_config,
                                    logging_frequency=logging_frequency)
 
         print('LOSS train {}'.format(avg_loss))
@@ -246,6 +312,54 @@ def sine_training(L=10, hidden=64, epochs=20, device_id: int = 0):
     return losses
 
 
+def sine_training_flossing(L=10, hidden=64, epochs=20, device_id: int = 0):
+    torch.manual_seed(0)
+    device = torch.device(f'cuda:{device_id}' if torch.cuda.is_available() else 'cpu')
+
+    dtype = torch.float32
+
+    print("Running on device", device)
+
+    input_features = 1
+    output_features = input_features
+
+    model = DeepLipschitzSequential(input_features, output_features, (hidden,) * L, device=device)
+
+    check_gradients = False
+
+    if check_gradients:
+        for name, p in model.named_parameters():
+            def function(grad):
+                if grad.isnan().any():
+                    print("GRADIENT IS NAN IN {}".format(name))
+
+            p.register_post_accumulate_grad_hook(function)
+
+    model = torch.compile(model, mode='max-autotune')
+
+    print(model)
+    print(print_num_parameters(model))
+
+    batch = 64
+
+    x = torch.linspace(-10, 10, 100000 * input_features, device=device, dtype=dtype).reshape((-1, input_features))
+
+    variation = torch.arange(input_features, device=device, dtype=dtype)
+
+    y = torch.sin(x + variation)
+    theoretical_lower = 0
+
+    flossing_config = FlossingConfig(enabled=True, flossing_frequency=1, weight=0.0)
+
+    _, _, _, losses = train(x, y, model, flossing_config=flossing_config, learning_prefix='sine_flossing',
+                            batch_size=batch, termination_error=1e-4, lr=1e-4,
+                            theoretical_lower=theoretical_lower,
+                            epochs=epochs)
+
+    return losses
+
+
 if __name__ == '__main__':
-    sine_training(L=10)
+    # sine_training(L=5)
+    sine_training_flossing(L=5)
     # main()
