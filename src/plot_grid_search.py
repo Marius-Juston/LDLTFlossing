@@ -149,7 +149,7 @@ def plot_all_runs(runs,
     else:
         ax.set_title("Training loss per run vs network depth $L$", fontsize=13)
 
-        cbar.set_label("Number of residual blocks (L)", fontsize=11)
+        cbar.set_label("Number of hidden layers (L)", fontsize=11)
 
     # Try to use integer ticks for L
     if L_max - L_min <= 12:
