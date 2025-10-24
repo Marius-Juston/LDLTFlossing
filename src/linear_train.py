@@ -246,11 +246,6 @@ def sine_training(L=10, hidden=64, epochs=20, device_id: int = 0):
     return losses
 
 
-def grid_search(L=15, hidden=(8, 16, 32, 64, 128)):
-    pass
-
-
 if __name__ == '__main__':
-    grid_search()
-    # sine_training(L=10)
+    sine_training(L=10)
     # main()
