@@ -252,9 +252,9 @@ class DeepLipschitzSequential(nn.Module):
 
         x = x_data.clone()
 
-        if n_random_samples and n_random_samples > x.shape[0]:
-            random_sample_indices = torch.randperm(x.shape[0])[:n_random_samples]
-            x = x[random_sample_indices]
+        if n_random_samples and n_random_samples < x_data.shape[0]:
+            random_sample_indices = torch.randperm(x_data.shape[0])[:n_random_samples]
+            x_data = x_data[random_sample_indices]
 
         x.requires_grad = True
 
