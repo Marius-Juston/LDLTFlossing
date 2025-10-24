@@ -162,13 +162,17 @@ def train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_index, tb_
 
 def train(x, y, model: DeepLipschitzLinearResNet, flossing_config: Optional[FlossingConfig] = None,
           learning_prefix='sine', batch_size=64, lr=1e-3,
-          termination_error=5e-3, epochs=100, theoretical_lower=0, logging_frequency=100):
+          termination_error=5e-3, epochs=100, theoretical_lower=0, logging_frequency=100,
+          logging_folder=None):
     if flossing_config is None:
         flossing_config = FlossingConfig(enabled=False)
 
-    # Initializing in a separate cell so we can easily add more epochs to the same run
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    save_folder = f'../runs/{learning_prefix}_trainer_{timestamp}'
+    if logging_folder is not None:
+        save_folder = logging_folder
+    else:
+        # Initializing in a separate cell so we can easily add more epochs to the same run
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        save_folder = f'../runs/{learning_prefix}_trainer_{timestamp}'
 
     writer = SummaryWriter(save_folder)
 

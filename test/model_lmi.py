@@ -543,7 +543,7 @@ def plot_information(M, a_weight, Cs, b_weight, dimensions, figs_folder, suffix=
 def main():
     torch.manual_seed(0)
 
-    model_fnc = DeepLipschitzLinearResNet
+    model_fnc = DeepLipschitzSequential
 
     figs_folder = f'figs/linear/{'resnet' if model_fnc == DeepLipschitzLinearResNet else 'fnn'}'
     os.makedirs(figs_folder, exist_ok=True)
@@ -554,7 +554,7 @@ def main():
 
     factory_kwargs = dict(device=device, dtype=torch.float32)
 
-    weights = (64, 64, 64, 64, 64)
+    weights = (64, ) * 20
 
     if model_fnc == DeepLipschitzLinearResNet:
         model_artifacting(model_fnc, weights, fig_name=os.path.join(figs_folder, "b_artifacting_grid"),
@@ -570,7 +570,7 @@ def main():
     model = model_fnc(*inputs, **factory_kwargs)
 
     # save_folder = '/home/mjuston2/Documents/DeepLipschitzResNet/runs/sine_trainer_20250923_003644'
-    save_folder = None
+    save_folder = '/home/mjuston2/Documents/LDLTFlossing/runs/sine_flossing_trainer_20251024_033615'
 
     if save_folder is not None:
         data = torch.load(f"{save_folder}/best.pt", map_location=device)

@@ -24,6 +24,7 @@ def load_grid_results(base_dir='../runs/grid_search'):
             continue
         L = run['L']
         h = run['hidden_size']
+        model_size = run['model_size']
         result_path = Path(run['run_dir']) / 'results.npz'
         if not result_path.exists():
             continue
@@ -31,7 +32,7 @@ def load_grid_results(base_dir='../runs/grid_search'):
         data = np.load(result_path, allow_pickle=True)
         meta = data['metadata'].item()
         best_loss = meta.get('best_loss', np.nan)
-        records.append({'L': L, 'hidden': h, 'best_loss': best_loss})
+        records.append({'L': L, 'hidden': h, 'model_size': model_size, 'best_loss': best_loss})
 
     df = pd.DataFrame(records)
     df.sort_values(by=['L', 'hidden'], inplace=True)
@@ -64,10 +65,12 @@ def load_runs(base_dir: Path):
 
         L = int(entry.get("L"))
         hidden = int(entry.get("hidden_size", -1))
+        model_size = int(entry.get("model_size", -1))
         runs.append({
             "L": L,
             "hidden": hidden,
             "losses": losses,
+            "model_size": model_size,
             "run_dir": str(run_dir)
         })
 
@@ -87,7 +90,7 @@ def plot_all_runs(runs,
                   network_size=False):
     # Prepare L range and colormap
     if network_size:
-        L_values = sorted({r["L"] * r['hidden'] for r in runs})
+        L_values = sorted({r['model_size'] if 'model_size' in r else r["L"] * r['hidden'] for r in runs})
     else:
         L_values = sorted({r["L"] for r in runs})
     L_min, L_max = min(L_values), max(L_values)
@@ -115,7 +118,7 @@ def plot_all_runs(runs,
     for r in runs:
 
         if network_size:
-            L = r["L"] * r['hidden']
+            L = r['model_size'] if 'model_size' in r else r["L"] * r['hidden']
         else:
             L = r["L"]
 
@@ -166,9 +169,9 @@ def plot_all_runs(runs,
     print(f"Saved: {out_png}")
 
 
-def parameter_plots():
+def parameter_plots(stacked=False):
     # === User-configurable ===
-    BASE_DIR = Path("../runs/grid_search")  # location of index.json and run folders
+    BASE_DIR = Path(f"../runs/grid_search{'_stack' if stacked else ''}")  # location of index.json and run folders
     FIGSIZE = (9, 6)
 
     YSCALE_LOG = False  # set False if you prefer linear y-axis
@@ -214,8 +217,10 @@ def plot_grid_results(df, save_path='../runs/grid_search/summary_plot.png', dpi=
 
 
 if __name__ == "__main__":
-    df = load_grid_results("../runs/grid_search")
+    stacked = False
+
+    df = load_grid_results(f"../runs/grid_search{'_stack' if stacked else ''}")
     print(df)
     plot_grid_results(df, dpi=DPI)
 
-    parameter_plots()
+    parameter_plots(stacked)

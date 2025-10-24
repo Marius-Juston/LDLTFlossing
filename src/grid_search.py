@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 from linear_train import train
-from models.linear_model import DeepLipschitzSequential
+from models.linear_model import DeepLipschitzSequential, DeepLipschitzSequentialStack
 
 
 def worker_run(task):
@@ -25,6 +25,8 @@ def worker_run(task):
     batch_size = int(task['batch_size'])
     lr = float(task['lr'])
     device_id = int(task['device_id'])
+    num_interior = int(task['num_interior'])
+    stack = bool(task['stack'])
     base_save_dir = Path(task['base_save_dir'])
     dtype = torch.float32
 
@@ -43,7 +45,17 @@ def worker_run(task):
     # Create the model on the worker GPU
     input_features = 1
     output_features = 1
-    model = DeepLipschitzSequential(input_features, output_features, (hidden_size,) * L, device=device)
+
+    if stack:
+        model = DeepLipschitzSequentialStack(input_features, output_features, num_layers=L,
+                                             num_interior_layers=num_interior, num_hidden=hidden_size, device=device)
+    else:
+        model = DeepLipschitzSequential(input_features, output_features, (hidden_size,) * (L * num_interior),
+                                        device=device)
+
+    model_size = sum([p.numel() for p in model.parameters() if p.requires_grad])
+
+    print(f"Number of parameters: {model_size}")
 
     model = torch.compile(model, mode='reduce-overhead')
 
@@ -59,10 +71,12 @@ def worker_run(task):
     run_dir = base_save_dir / run_dir_name
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    tensorboard_log_folder = run_dir / 'logs'
+
     # call train (this will save best.pt inside some save_folder)
     try:
         save_folder, best_loss, best_epoch, losses = train(x, y, model,
-                                                           learning_prefix=f'grid_search/{run_dir_name}/logs',
+                                                           logging_folder=tensorboard_log_folder,
                                                            batch_size=batch_size,
                                                            lr=lr,
                                                            termination_error=1e-4,
@@ -77,7 +91,8 @@ def worker_run(task):
             'L': L,
             'hidden_size': hidden_size,
             'device_id': device_id,
-            'timestamp': timestamp
+            'timestamp': timestamp,
+            'model_size': model_size
         }
         (run_dir / 'error.json').write_text(json.dumps(err_info, indent=2))
         return err_info
@@ -89,7 +104,8 @@ def worker_run(task):
         'device_id': device_id,
         'best_loss': None if best_loss is None else float(best_loss),
         'best_epoch': None if best_epoch is None else int(best_epoch),
-        'save_folder': save_folder,
+        'save_folder': str(save_folder.absolute()),
+        'model_size': model_size
     }
 
     # convert losses into a numpy array and save them
@@ -108,13 +124,17 @@ def worker_run(task):
 
 def grid_search(L_start=3, L_end=15, L_step=2, hidden=(8, 16, 32, 64, 128),
                 epochs=20, batch_size=64, lr=1e-4, base_save_dir='../runs/grid_search',
-                num_gpus=4):
+                num_gpus=4, num_interior=5, stack=False):
     """
     Orchestrates a grid search over L in [L_start..L_end] step L_step and hidden sizes.
     Uses up to `num_gpus` processes in parallel (round-robin GPU assignment).
     Results are saved per-run to `base_save_dir`.
     """
+    if stack:
+        base_save_dir += '_stack'
+
     base_save_dir = Path(base_save_dir)
+
     base_save_dir.mkdir(parents=True, exist_ok=True)
 
     # Build task list
@@ -129,7 +149,9 @@ def grid_search(L_start=3, L_end=15, L_step=2, hidden=(8, 16, 32, 64, 128),
                 'batch_size': batch_size,
                 'lr': lr,
                 'device_id': None,  # assigned below
-                'base_save_dir': str(base_save_dir),
+                'base_save_dir': str(base_save_dir.absolute()),
+                'stack': stack,
+                'num_interior': num_interior,
             })
 
     # assign device ids round-robin
@@ -176,4 +198,4 @@ def grid_search(L_start=3, L_end=15, L_step=2, hidden=(8, 16, 32, 64, 128),
 
 if __name__ == '__main__':
     grid_search(L_start=3, L_end=15, L_step=2, hidden=(8, 16, 32, 64, 128), epochs=20,
-                batch_size=64, lr=1e-4, base_save_dir='../runs/grid_search', num_gpus=4)
+                batch_size=64, lr=1e-4, base_save_dir='../runs/grid_search', num_gpus=4, stack=False, num_interior=5)
