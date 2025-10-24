@@ -1,4 +1,6 @@
 # Training loops
+runs/
+test/figs
 
 # Discord bot
 .env
