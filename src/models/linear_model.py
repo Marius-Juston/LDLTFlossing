@@ -250,36 +250,36 @@ class DeepLipschitzSequential(nn.Module):
             # Normalize only once at the end
             normalization_frequency = len(self.layers) - 1
 
-        x = x_data.clone()
-
         if n_random_samples and n_random_samples < x_data.shape[0]:
             random_sample_indices = torch.randperm(x_data.shape[0])[:n_random_samples]
             x_data = x_data[random_sample_indices]
 
-        x.requires_grad = True
+        batch_size = x_data.shape[0]
 
-        batch_size = x.shape[0]
-
-        Q, R = torch.linalg.qr(torch.randn(*x.shape, nle, **self.factory_kwargs))
+        Q, R = torch.linalg.qr(torch.randn(*x_data.shape, nle, **self.factory_kwargs))
         ls = torch.zeros(batch_size, nle, dtype=torch.float32, device=self.device)
 
-        current_input = x
+        current_input = x_data
         d_sqrt = self.lipschitz_constant * self.layers[0].identity
         prev_alpha = torch.tensor(1.0, **self.factory_kwargs)
         prev_const = torch.tensor(1.0, **self.factory_kwargs)
 
         for step, layer in enumerate(self.layers):
+            current_input_for_jac = current_input.detach().requires_grad_(True)
+
             if isinstance(layer, nn.Dropout):
                 layer_out = layer(current_input)
 
                 # FIXME: Very inefficient, but ¯\_(ツ)_/¯
-                D = torch.func.vmap(torch.func.jacfwd(layer))(current_input)
+                D = torch.func.vmap(torch.func.jacfwd(layer))(current_input_for_jac)
             else:
                 layer: LinearLipschitz
 
                 # FIXME: Very inefficient, but ¯\_(ツ)_/¯
-                D, _ , _ = torch.func.vmap(torch.func.jacfwd(layer),
-                                    in_dims=(0, None, None, None))(current_input, d_sqrt, prev_alpha, prev_const)
+                D, *_ = torch.func.vmap(
+                    torch.func.jacfwd(lambda inp, d, a, c: layer(inp, d, a, c)[0]),
+                    in_dims=(0, None, None, None)
+                )(current_input_for_jac, d_sqrt, prev_alpha, prev_const)
 
                 layer_out, d_sqrt, _ = layer(current_input, d_sqrt, prev_alpha, prev_const)
 

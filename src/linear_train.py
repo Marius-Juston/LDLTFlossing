@@ -349,7 +349,7 @@ def sine_training_flossing(L=10, hidden=64, epochs=20, device_id: int = 0):
     y = torch.sin(x + variation)
     theoretical_lower = 0
 
-    flossing_config = FlossingConfig(enabled=True, flossing_frequency=1, weight=0.0)
+    flossing_config = FlossingConfig(enabled=True, flossing_frequency=1, weight=0.1)
 
     _, _, _, losses = train(x, y, model, flossing_config=flossing_config, learning_prefix='sine_flossing',
                             batch_size=batch, termination_error=1e-4, lr=1e-4,
