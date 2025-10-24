@@ -9,11 +9,22 @@ from torch.nn import MSELoss
 from torch.utils.data import TensorDataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-from models.linear_model import DeepLipschitzLinearResNet
+from models.linear_model import DeepLipschitzLinearResNet, DeepLipschitzSequential
 
 DPI = 600
 
-torch.set_float32_matmul_precision('high')
+torch.backends.fp32_precision = "tf32"
+torch.backends.cuda.matmul.fp32_precision = "tf32"
+torch.backends.cudnn.fp32_precision = "tf32"
+torch.backends.cudnn.conv.fp32_precision = "tf32"
+torch.backends.cudnn.rnn.fp32_precision = "tf32"
+
+# The flag below controls whether to allow TF32 on matmul. This flag defaults to False
+# in PyTorch 1.12 and later.
+torch.backends.cuda.matmul.allow_tf32 = True
+
+# The flag below controls whether to allow TF32 on cuDNN. This flag defaults to True.
+torch.backends.cudnn.allow_tf32 = True
 
 
 # torch.autograd.set_detect_anomaly(True)
@@ -106,6 +117,8 @@ def train(x, y, model: DeepLipschitzLinearResNet, learning_prefix='sine', batch_
     best_loss = None
     best_epoch = None
 
+    losses = []
+
     # theoretical_lower = 135.021966261
     # theoretical_lower = 0
 
@@ -118,6 +131,8 @@ def train(x, y, model: DeepLipschitzLinearResNet, learning_prefix='sine', batch_
                                    logging_frequency=logging_frequency)
 
         print('LOSS train {}'.format(avg_loss))
+
+        losses.append(avg_loss)
 
         # Log the running loss averaged per batch
         # for both training and validation
@@ -170,7 +185,7 @@ def train(x, y, model: DeepLipschitzLinearResNet, learning_prefix='sine', batch_
 
         epoch_number += 1
 
-    return save_folder, best_loss, best_epoch
+    return save_folder, best_loss, best_epoch, losses
 
 
 def print_num_parameters(model):
@@ -187,9 +202,9 @@ def print_num_parameters(model):
     return total_params
 
 
-def main():
+def sine_training(L=10, hidden=64, epochs=20, device_id: int = 0):
     torch.manual_seed(0)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device(f'cuda:{device_id}' if torch.cuda.is_available() else 'cpu')
 
     dtype = torch.float32
 
@@ -197,12 +212,8 @@ def main():
 
     input_features = 1
     output_features = input_features
-    enable_alpha = True
 
-    # model = DeepLipschitzSequential(input_features, output_features, (64, 64, 64, 64, 64), device=device)
-    model = DeepLipschitzLinearResNet(input_features, output_features, (64, 64, 64, 64, 64),
-                                      enable_alpha=enable_alpha,
-                                      device=device)
+    model = DeepLipschitzSequential(input_features, output_features, (hidden,) * L, device=device)
 
     check_gradients = False
 
@@ -225,68 +236,21 @@ def main():
 
     variation = torch.arange(input_features, device=device, dtype=dtype)
 
-    # y =  1/2 * torch.sin(x + variation) + x
-    # theoretical_lower = 0.11929 * 0.95
     y = torch.sin(x + variation)
     theoretical_lower = 0
 
-    train(x, y, model, learning_prefix='general', batch_size=batch, termination_error=1e-4, lr=1e-4,
-          theoretical_lower=theoretical_lower)
+    _, _, _, losses = train(x, y, model, learning_prefix='sine', batch_size=batch, termination_error=1e-4, lr=1e-4,
+                            theoretical_lower=theoretical_lower,
+                            epochs=epochs)
+
+    return losses
 
 
-def sine_training():
-    torch.manual_seed(0)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    dtype = torch.float32
-
-    print("Running on device", device)
-
-    input_features = 1
-    output_features = input_features
-    enable_alpha = True
-
-    # model = DeepLipschitzSequential(input_features, output_features, (64, 64, 64, 64, 64), device=device)
-    model = DeepLipschitzLinearResNet(input_features, output_features, (64, 64, 64, 64, 64),
-                                      enable_alpha=enable_alpha,
-                                      device=device, dtype=dtype)
-
-    check_gradients = False
-
-    if check_gradients:
-        for name, p in model.named_parameters():
-            def function(grad):
-                if grad.isnan().any():
-                    print("GRADIENT IS NAN IN {}".format(name))
-
-            p.register_post_accumulate_grad_hook(function)
-
-    model = torch.compile(model, mode='max-autotune')
-
-    print(model)
-    print(print_num_parameters(model))
-
-    batch = 64
-
-    x = torch.linspace(-10, 10, 100000 * input_features, device=device, dtype=dtype).reshape((-1, input_features))
-
-    variation = torch.arange(input_features, device=device, dtype=dtype)
-
-    # y =  1/2 * torch.sin(x + variation) + 4 * x
-    # theoretical_lower = 302.473302346 * 0.9
-    # y =  1/2 * torch.sin(x + variation)
-    y = torch.sin(x + variation)
-    theoretical_lower = 0
-
-    # y = torch.sin(x + variation)
-    # y = 1/2 * torch.sin(x + variation)
-
-    train(x, y, model, learning_prefix='sine', batch_size=batch, termination_error=1e-4, lr=1e-4,
-          theoretical_lower=theoretical_lower)
-
-    # empirical_gradient_max_norm(model, x, device=device)
+def grid_search(L=15, hidden=(8, 16, 32, 64, 128)):
+    pass
 
 
 if __name__ == '__main__':
-    sine_training()
+    grid_search()
+    # sine_training(L=10)
     # main()
