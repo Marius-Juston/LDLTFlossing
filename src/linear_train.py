@@ -10,7 +10,7 @@ from torch.nn import MSELoss
 from torch.utils.data import TensorDataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-from models.linear_model import DeepLipschitzLinearResNet, DeepLipschitzSequential
+from models.linear_model import DeepLipschitzLinearResNet, DeepLipschitzSequential, DeepLipschitzSequentialStack
 
 DPI = 600
 
@@ -55,6 +55,7 @@ class FlossingConfig:
     flossing_le: int = 1
     num_sample_trajectories: int = 300
     weight: float = 0.05
+    offset: float = 0.5
 
 
 def train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_index, tb_writer, flossing_config: FlossingConfig,
@@ -92,7 +93,7 @@ def train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_index, tb_
             else:
                 running_max_le = max(running_max_le, le.max().item())
 
-            flossing_loss = torch.square(le).mean()
+            flossing_loss = torch.square(le + flossing_config.offset).mean()
 
             output_loss = loss_fn(outputs, labels)
 
@@ -137,7 +138,9 @@ def train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_index, tb_
                 tb_writer.add_scalar('Loss/Flossing', last_flossing_loss, tb_x)
                 tb_writer.add_scalar('Loss/Flossing MAx', running_max_le, tb_x)
 
-                print('  batch {} loss: {} flossing (max: {}): {} output: {}'.format(i + 1, last_loss, running_max_le, last_flossing_loss, last_output_loss))
+                print('  batch {} loss: {} flossing (max: {}): {} output: {}'.format(i + 1, last_loss, running_max_le,
+                                                                                     last_flossing_loss,
+                                                                                     last_output_loss))
 
             else:
                 print('  batch {} loss: {}'.format(i + 1, last_loss))
@@ -168,6 +171,14 @@ def train(x, y, model: DeepLipschitzLinearResNet, flossing_config: Optional[Flos
     save_folder = f'../runs/{learning_prefix}_trainer_{timestamp}'
 
     writer = SummaryWriter(save_folder)
+
+    hparam_dict = {
+        'flossing': flossing_config.enabled,
+        'weight': flossing_config.weight,
+        'num_sample_trajectories': flossing_config.num_sample_trajectories,
+        'flossing_le': flossing_config.flossing_le,
+        'offset': flossing_config.offset,
+    }
 
     # writer.add_graph(model, torch.randn((10, model.in_features), device=model.device))
 
@@ -248,6 +259,8 @@ def train(x, y, model: DeepLipschitzLinearResNet, flossing_config: Optional[Flos
 
             writer.add_scalar('Training/Best Epoch', best_epoch + 1, epoch_number + 1)
             writer.add_scalar('Training/Best Loss', best_loss, epoch_number + 1)
+
+            writer.add_hparams(hparam_dict, metric_dict={'hparam/best_loss': best_loss}, global_step=epoch_number)
 
         epoch_number += 1
 
@@ -359,7 +372,53 @@ def sine_training_flossing(L=10, hidden=64, epochs=20, device_id: int = 0):
     return losses
 
 
+def sine_training_grouped(L=2, hidden=64, L_int=4, epochs=20, device_id: int = 0):
+    torch.manual_seed(0)
+    device = torch.device(f'cuda:{device_id}' if torch.cuda.is_available() else 'cpu')
+
+    dtype = torch.float32
+
+    print("Running on device", device)
+
+    input_features = 1
+    output_features = input_features
+
+    model = DeepLipschitzSequentialStack(input_features, output_features, num_layers=L, num_hidden=hidden,
+                                         num_interior_layers=L_int, device=device)
+
+    check_gradients = False
+
+    if check_gradients:
+        for name, p in model.named_parameters():
+            def function(grad):
+                if grad.isnan().any():
+                    print("GRADIENT IS NAN IN {}".format(name))
+
+            p.register_post_accumulate_grad_hook(function)
+
+    model = torch.compile(model, mode='max-autotune')
+
+    print(model)
+    print(print_num_parameters(model))
+
+    batch = 64
+
+    x = torch.linspace(-10, 10, 100000 * input_features, device=device, dtype=dtype).reshape((-1, input_features))
+
+    variation = torch.arange(input_features, device=device, dtype=dtype)
+
+    y = torch.sin(x + variation)
+    theoretical_lower = 0
+
+    _, _, _, losses = train(x, y, model, learning_prefix='sine_stacked', batch_size=batch, termination_error=1e-4, lr=1e-4,
+                            theoretical_lower=theoretical_lower,
+                            epochs=epochs)
+
+    return losses
+
+
 if __name__ == '__main__':
-    # sine_training(L=5)
-    sine_training_flossing(L=5)
+    # sine_training(L=20)
+    sine_training_grouped(L=5)
+    # sine_training_flossing(L=20)
     # main()

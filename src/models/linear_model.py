@@ -1,4 +1,4 @@
-from typing import Union, List, Sequence, Tuple
+from typing import Union, List, Sequence, Tuple, Optional
 
 import torch
 from torch import nn, Tensor
@@ -295,3 +295,62 @@ class DeepLipschitzSequential(nn.Module):
                 ls += torch.log(torch.abs(torch.diagonal(R, dim1=-2, dim2=-1))) / normalization_frequency
 
         return ls, current_input
+
+
+class DeepLipschitzSequentialStack(nn.Module):
+    def __init__(self, in_features: int, out_features: int, num_layers: int, num_interior_layers: int, num_hidden: int,
+                 activation: Union[Module, List[Module]] = None, interior_activation: Optional[Module] = None,
+                 lipschitz_constant: float = 1.0,
+                 dropout=False,
+                 device: Union[str, torch.device] = 'cuda', dtype=None):
+        super().__init__()
+
+        self.interior_activation = interior_activation
+        self.num_hidden = num_hidden
+        self.num_interior_layers = num_interior_layers
+        self.num_layers = num_layers
+        assert in_features > 0, "The input width needs to be larger than 0"
+        assert out_features > 0, "The output width needs to be larger than 0"
+
+        self.dropout = dropout
+        self.lipschitz_constant = lipschitz_constant
+        self.lipschitz_constant_sq = lipschitz_constant * lipschitz_constant
+
+        self.out_features = out_features
+        self.in_features = in_features
+
+        self.dtype = dtype
+        self.device = device
+
+        self.factory_kwargs = {"device": device, "dtype": dtype}
+
+        if activation is None:
+            self.activation = ReLU()
+        else:
+            self.activation = activation
+
+        self.generate_layers()
+
+    def generate_layers(self):
+        model = []
+
+        prev = self.in_features
+
+        for i in range(self.num_layers - 1):
+            model.append(DeepLipschitzSequential(prev, self.num_hidden, (self.num_hidden,) * self.num_interior_layers,
+                                                 activation=self.activation, lipschitz_constant=self.lipschitz_constant,
+                                                 dropout=self.dropout, **self.factory_kwargs))
+
+            if self.interior_activation is not None:
+                model.append(self.interior_activation)
+
+            prev = self.num_hidden
+
+        model.append(DeepLipschitzSequential(prev, self.out_features, (self.num_hidden,) * self.num_interior_layers,
+                                             activation=self.activation, lipschitz_constant=self.lipschitz_constant,
+                                             dropout=self.dropout, **self.factory_kwargs))
+
+        self.layers = nn.Sequential(*model)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.layers(x)
