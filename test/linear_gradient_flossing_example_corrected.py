@@ -241,7 +241,7 @@ def main():
     n_hidden = 5
     Nout = Nin
     nle = 16  # here used as number of Hutchinson probes
-    Ef = 50  # epochs (made smaller for demo)
+    Ef = 100  # epochs (made smaller for demo)
 
     sample_division = 10
 
