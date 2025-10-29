@@ -84,10 +84,8 @@ def calculate_lyapunov_spectrum(linear_network, x_data, nle, n_random_samples: i
     ls = torch.zeros(batch_size, nle, dtype=torch.float32, device=linear_network.device)
 
     for step, layer in enumerate(linear_network.model):
-        layer_out = layer(x)
-
-        # FIXME: Very inefficient, but ¯\_(ツ)_/¯
-        D = torch.func.vmap(torch.func.jacfwd(layer))(x)
+        layer_out, jvp_fn  = torch.func.linearize(layer, x)
+        D = jvp_fn(x)
 
         x = layer_out
 

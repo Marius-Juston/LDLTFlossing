@@ -1,5 +1,6 @@
 import dataclasses
 import os
+import traceback
 from datetime import datetime
 from typing import Dict, Optional
 
@@ -51,11 +52,13 @@ def alpha_values(model: DeepLipschitzLinearResNet) -> Dict[str, float]:
 @dataclasses.dataclass()
 class FlossingConfig:
     enabled: bool = False
+    enable_logging: bool = True
     flossing_frequency: Optional[int] = None
     flossing_le: int = 1
     num_sample_trajectories: int = 300
     weight: float = 0.05
-    offset: float = 0.5
+    offset: float = 0.15
+    stop_criteria: float = -0.75
 
 
 def train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_index, tb_writer, flossing_config: FlossingConfig,
@@ -67,6 +70,8 @@ def train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_index, tb_
     running_flossing_loss = 0.
 
     running_max_le = None
+
+    lyponov_exponents = []
 
     # Here, we use enumerate(training_loader) instead of
     # iter(training_loader) so that we can track the batch
@@ -82,11 +87,13 @@ def train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_index, tb_
         # Zero your gradients for every batch!
         optimizer.zero_grad(set_to_none=True)
 
-        if flossing_config.enabled:
+        if flossing_config.enabled or flossing_config.enable_logging:
             # FIXME gradient issue with this and the forward function, disabling training
             le, outputs = model.calculate_lyapunov_spectrum(inputs, nle=flossing_config.flossing_le,
                                                             n_random_samples=flossing_config.num_sample_trajectories,
                                                             normalization_frequency=flossing_config.flossing_frequency)
+
+            lyponov_exponents.append(le.detach())
 
             if running_max_le is None:
                 running_max_le = le.max().item()
@@ -97,7 +104,7 @@ def train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_index, tb_
 
             output_loss = loss_fn(outputs, labels)
 
-            if flossing_config.weight > 0:
+            if flossing_config.weight > 0 and flossing_config.enabled and flossing_loss < flossing_config.stop_criteria:
                 loss = flossing_config.weight * flossing_loss + output_loss
             else:
                 loss = output_loss
@@ -117,7 +124,7 @@ def train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_index, tb_
         # Gather data and report
         running_loss += loss.item()
 
-        if flossing_config.enabled:
+        if flossing_config.enabled or flossing_config.enable_logging:
             running_output_loss += output_loss.item()
             running_flossing_loss += flossing_loss.item()
         else:
@@ -132,7 +139,7 @@ def train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_index, tb_
 
             last_output_loss = running_output_loss / logging_frequency
 
-            if flossing_config.enabled:
+            if flossing_config.enabled or flossing_config.enable_logging:
                 last_flossing_loss = running_flossing_loss / logging_frequency
 
                 tb_writer.add_scalar('Loss/Flossing', last_flossing_loss, tb_x)
@@ -157,7 +164,7 @@ def train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_index, tb_
 
                 tb_writer.add_scalars('Training/Alpha', alpha_vals, tb_x, tb_x)
 
-    return last_loss
+    return last_loss, lyponov_exponents
 
 
 def train(x, y, model: DeepLipschitzLinearResNet, flossing_config: Optional[FlossingConfig] = None,
@@ -203,13 +210,26 @@ def train(x, y, model: DeepLipschitzLinearResNet, flossing_config: Optional[Flos
     # theoretical_lower = 135.021966261
     # theoretical_lower = 0
 
+    error = None
+
+    running_lyapunov_exponents = []
+
     for epoch in range(epochs):
         print('EPOCH {}:'.format(epoch_number + 1))
 
         # Make sure gradient tracking is on, and do a pass over the data
         model.train(True)
-        avg_loss = train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_number, writer, flossing_config,
-                                   logging_frequency=logging_frequency)
+
+        try:
+            avg_loss, lyponov_exponents = train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_number,
+                                                          writer, flossing_config,
+                                                          logging_frequency=logging_frequency)
+        except Exception as e:
+            traceback.print_exc()
+            error = e
+            break
+
+        running_lyapunov_exponents.extend(lyponov_exponents)
 
         print('LOSS train {}'.format(avg_loss))
 
@@ -268,7 +288,9 @@ def train(x, y, model: DeepLipschitzLinearResNet, flossing_config: Optional[Flos
 
         epoch_number += 1
 
-    return save_folder, best_loss, best_epoch, losses
+    running_lyapunov_exponents = torch.stack(running_lyapunov_exponents).tolist()
+
+    return error, save_folder, best_loss, best_epoch, losses, running_lyapunov_exponents
 
 
 def print_num_parameters(model):
@@ -322,9 +344,10 @@ def sine_training(L=10, hidden=64, epochs=20, device_id: int = 0):
     y = torch.sin(x + variation)
     theoretical_lower = 0
 
-    _, _, _, losses = train(x, y, model, learning_prefix='sine', batch_size=batch, termination_error=1e-4, lr=1e-4,
-                            theoretical_lower=theoretical_lower,
-                            epochs=epochs)
+    _, _, _, _, losses, _ = train(x, y, model, learning_prefix='sine', batch_size=batch, termination_error=1e-4,
+                                  lr=1e-4,
+                                  theoretical_lower=theoretical_lower,
+                                  epochs=epochs)
 
     return losses
 
@@ -366,12 +389,12 @@ def sine_training_flossing(L=10, hidden=64, epochs=20, device_id: int = 0):
     y = torch.sin(x + variation)
     theoretical_lower = 0
 
-    flossing_config = FlossingConfig(enabled=True, flossing_frequency=1, weight=0.1)
+    flossing_config = FlossingConfig(enabled=False, flossing_frequency=1, weight=0.1, enable_logging=True)
 
-    _, _, _, losses = train(x, y, model, flossing_config=flossing_config, learning_prefix='sine_flossing',
-                            batch_size=batch, termination_error=1e-4, lr=1e-4,
-                            theoretical_lower=theoretical_lower,
-                            epochs=epochs)
+    _, _, _, _, losses, _ = train(x, y, model, flossing_config=flossing_config, learning_prefix='sine_flossing',
+                                  batch_size=batch, termination_error=1e-4, lr=1e-4,
+                                  theoretical_lower=theoretical_lower,
+                                  epochs=epochs)
 
     return losses
 
@@ -414,15 +437,16 @@ def sine_training_grouped(L=2, hidden=64, L_int=4, epochs=20, device_id: int = 0
     y = torch.sin(x + variation)
     theoretical_lower = 0
 
-    _, _, _, losses = train(x, y, model, learning_prefix='sine_stacked', batch_size=batch, termination_error=1e-4, lr=1e-4,
-                            theoretical_lower=theoretical_lower,
-                            epochs=epochs)
+    _, _, _, _, losses, _ = train(x, y, model, learning_prefix='sine_stacked', batch_size=batch, termination_error=1e-4,
+                                  lr=1e-4,
+                                  theoretical_lower=theoretical_lower,
+                                  epochs=epochs)
 
     return losses
 
 
 if __name__ == '__main__':
-    # sine_training(L=20)
-    sine_training_grouped(L=5)
-    # sine_training_flossing(L=20)
+    # sine_training(L=10)
+    # sine_training_grouped(L=5)
+    sine_training_flossing(L=5)
     # main()

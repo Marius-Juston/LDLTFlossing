@@ -194,7 +194,7 @@ def train_loop(model, optimizer, num_steps, k, dataloader, device,
                 else:
                     lyapunov_loss = torch.tensor(0.0, device=device)
 
-            optimizer.zero_grad(set_to_none=True)
+            optimizer.zero_grad(set_to_none=False)
             y_pred = model(x)
             data_loss = criterion(y_pred, y)
 

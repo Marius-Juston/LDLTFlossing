@@ -79,28 +79,29 @@ def worker_run(task):
     tensorboard_log_folder = run_dir / 'logs'
 
     # call train (this will save best.pt inside some save_folder)
-    try:
-        save_folder, best_loss, best_epoch, losses = train(x, y, model,
-                                                           logging_folder=tensorboard_log_folder,
-                                                           batch_size=batch_size,
-                                                           lr=lr,
-                                                           termination_error=1e-4,
-                                                           epochs=epochs,
-                                                           theoretical_lower=0,
-                                                           logging_frequency=100,
-                                                           flossing_config=flossing_config)
-    except Exception as e:
+    error, save_folder, best_loss, best_epoch, losses, running_lyapunov_exponents = train(x, y, model,
+                                                                                          logging_folder=tensorboard_log_folder,
+                                                                                          batch_size=batch_size,
+                                                                                          lr=lr,
+                                                                                          termination_error=1e-4,
+                                                                                          epochs=epochs,
+                                                                                          theoretical_lower=0,
+                                                                                          logging_frequency=100,
+                                                                                          flossing_config=flossing_config)
+
+    if error is not None:
         # collect exception info and save a small json in run_dir
         err_info = {
             'status': 'failed',
-            'exception': repr(e),
+            'exception': repr(error),
             'L': L,
             'hidden_size': hidden_size,
             'L_actual': L_actual,
             'device_id': device_id,
             'timestamp': timestamp,
             'model_size': model_size,
-            'flossing_config': asdict(flossing_config)
+            'flossing_config': asdict(flossing_config),
+            'running_lyapunov_exponents': running_lyapunov_exponents
         }
         (run_dir / 'error.json').write_text(json.dumps(err_info, indent=2))
         return err_info
@@ -116,7 +117,8 @@ def worker_run(task):
         'best_epoch': None if best_epoch is None else int(best_epoch),
         'save_folder': str(save_folder.absolute()),
         'model_size': model_size,
-        'flossing_config': asdict(flossing_config)
+        'flossing_config': asdict(flossing_config),
+        'running_lyapunov_exponents': running_lyapunov_exponents
     }
 
     # convert losses into a numpy array and save them
@@ -157,7 +159,6 @@ def grid_search(L_start=3, L_end=15, L_step=2, hidden=(8, 16, 32, 64, 128),
         flossing_config.enabled = flossing
     else:
         flossing_config = None
-
 
     # Build task list
     L_values = list(range(L_start, L_end + 1, L_step))
@@ -225,4 +226,5 @@ if __name__ == '__main__':
     #             batch_size=64, lr=1e-4, base_save_dir='../runs/grid_search', num_gpus=4, stack=False, num_interior=4)
 
     grid_search(L_start=3, L_end=13, L_step=2, hidden=(8, 16, 32, 64, 128), epochs=20,
-                batch_size=64, lr=1e-4, base_save_dir='../runs/grid_search', num_gpus=4, stack=False, num_interior=4, flossing=True)
+                batch_size=64, lr=1e-4, base_save_dir='../runs/grid_search', num_gpus=4, stack=False, num_interior=4,
+                flossing=True)
