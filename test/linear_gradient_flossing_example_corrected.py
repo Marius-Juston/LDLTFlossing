@@ -124,26 +124,27 @@ def train_loop(model, optimizer, num_steps, k, dataloader, device,
     Q, _ = torch.linalg.qr(torch.randn((D, k), device=device))
     Q = Q.detach()
 
+    S = torch.zeros(k, device=device)  # cumulative sum of logs
+    tacc = 0.0  # accumulated "time" (eta * steps)
+    steps_since_transient = 0
+
     step = 0
     loss_all = []
     lyapunov_exponents = []
 
-    batch_maxes = []
-    batch_mins = []
     Qs = []
 
     for epoch in range(num_steps):
         running_loss = 0.0
         n_batches = 0
 
-        current_max = []
-        current_min = []
-
         for x, y in dataloader:
             x = x.to(device)
             y = y.to(device)
 
             if enable_flossing:
+                print(f"[epoch {epoch + 1:03d}][step {step:03d}] Lyapunov Exponents")
+
                 # ----- curvature computation for THIS step (graph-contained) -----
                 params = live_params_dict()  # live leaves (requires_grad=True)
 
@@ -165,21 +166,28 @@ def train_loop(model, optimizer, num_steps, k, dataloader, device,
                 # J Q = Q - eta * (H @ Q)
 
                 # Jacobian action JQ = Q - eta * (H @ Q)
-                JQ = Q - lr * HQ  # differentiable w.r.t. params
+                JQ_step = Q - lr * HQ  # differentiable w.r.t. params
 
-                # QR factorization (R captures local expansion rates)
-                Q_new, R = torch.linalg.qr(JQ, mode='reduced')  # differentiable
+                with torch.no_grad():
+                    Q = JQ_step  # do NOT re-orthonormalize yet
+                steps_since_transient += 1
 
-                # Local Lyapunov exponents for this block
-                diag_r = R.diagonal().abs().clamp_min(1e-12)
-                local_exponents = torch.log(diag_r) / (nstepONS * lr)
+                # only after nstepONS steps (and past transient), orthonormalize once:
+                if step >= nStepTransient and (step + 1) % nstepONS == 0:
+                    print(f"[epoch {epoch + 1:03d}][step {step:03d}] Normalizing")
 
-                lyapunov_exponents.append(local_exponents.detach())
+                    # QR on the current block-propagated Q
+                    Q_new, R = torch.linalg.qr(Q, mode='reduced')
+                    diag_r = R.diagonal().abs().clamp_min(1e-12)
 
-                current_max.append(local_exponents.max().item())
-                current_min.append(local_exponents.min().item())
+                    # accumulate for the asymptotic spectrum
+                    S += torch.log(diag_r)
+                    tacc += nstepONS * lr
 
-                curv_pen = curv_coeff * local_exponents.square().sum()
+                    # reset basis to the orthonormal Q (do not keep graph)
+                    with torch.no_grad():
+                        Q = Q_new.detach()
+                    steps_since_transient = 0
 
             optimizer.zero_grad(set_to_none=True)
             y_pred = model(x)
@@ -187,7 +195,7 @@ def train_loop(model, optimizer, num_steps, k, dataloader, device,
 
             # Only activate after transient (optional, avoids early noise)
             if enable_flossing:
-                total_loss = data_loss + (curv_pen if step >= nStepTransient else 0.0)
+                total_loss = data_loss + (0.0 if step >= nStepTransient else 0.0)
             else:
                 total_loss = data_loss
 
@@ -197,25 +205,22 @@ def train_loop(model, optimizer, num_steps, k, dataloader, device,
             if enable_flossing:
                 Qs.append(Q.detach())
 
-                # Update Q state for the next step WITHOUT keeping graph history
-                # Otherwise causes
-                with torch.no_grad():
-                    Q = Q_new.detach()
-
             running_loss += data_loss.item()
             n_batches += 1
             step += 1
 
+        if tacc > 0:
+            lyapunov_spectrum = (S / tacc).detach().cpu()
+        else:
+            lyapunov_spectrum = torch.zeros(k)
+
+        lyapunov_exponents.append(lyapunov_spectrum)
+
         loss_all.append(running_loss / max(1, n_batches))
 
         if enable_flossing:
-            max_exponent = max(current_max)
-            min_exponent = min(current_min)
-
-            batch_maxes.append(max_exponent)
-            batch_mins.append(min_exponent)
-
-            print(f"[epoch {epoch + 1:03d}] loss={loss_all[-1]:.6f} max={max_exponent} min={min_exponent}")
+            print(
+                f"[epoch {epoch + 1:03d}] loss={loss_all[-1]:.6f} max={lyapunov_spectrum.max()} min={lyapunov_spectrum.min()}")
         else:
             print(f"[epoch {epoch + 1:03d}] loss={loss_all[-1]:.6f}")
 
@@ -225,8 +230,6 @@ def train_loop(model, optimizer, num_steps, k, dataloader, device,
     results = {
         'loss_all': loss_all,
         'lyapunov_exponents': lyapunov_exponents,
-        'batch_maxes': batch_maxes,
-        'batch_mins': batch_mins,
         'Qs': Qs,
     }
 
