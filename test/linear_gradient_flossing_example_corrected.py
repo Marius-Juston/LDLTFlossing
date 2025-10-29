@@ -80,7 +80,7 @@ class Network(nn.Module):
 
 def train_loop(model, optimizer, num_steps, k, dataloader, device,
                nstepONS,
-               curv_coeff=1e-3, nStepTransient=100, enable_flossing=False):
+               curv_coeff=1e-3, nStepTransient=100, enable_flossing=False, train_flossing=False):
     """
     Curvature-regularized training.
     - Uses k-column block Q (state, no grads across steps).
@@ -124,12 +124,16 @@ def train_loop(model, optimizer, num_steps, k, dataloader, device,
 
     step = 0
     loss_all = []
+    loss_lyapunov = []
+    loss_data = []
     lyapunov_exponents = []
 
     Qs = []
 
     for epoch in range(num_steps):
         running_loss = 0.0
+        running_loss_lyapunov = 0.0
+        running_loss_data = 0.0
         n_batches = 0
 
         for x, y in dataloader:
@@ -161,8 +165,12 @@ def train_loop(model, optimizer, num_steps, k, dataloader, device,
                 # Jacobian action JQ = Q - eta * (H @ Q)
                 JQ_step = Q - lr * HQ  # differentiable w.r.t. params
 
-                with torch.no_grad():
+                if train_flossing:
                     Q = JQ_step
+                else:
+                    with torch.no_grad():
+                        Q = JQ_step
+
                 steps_since_transient += 1
 
                 if step >= nStepTransient and (step + 1) % nstepONS == 0:
@@ -178,6 +186,14 @@ def train_loop(model, optimizer, num_steps, k, dataloader, device,
                         Q = Q_new.detach()
                     steps_since_transient = 0
 
+                    if train_flossing:
+                        lyapunov_spectrum = (S / tacc)
+                        lyapunov_loss = lyapunov_spectrum.square().mean()
+                    else:
+                        lyapunov_loss = torch.tensor(0.0, device=device)
+                else:
+                    lyapunov_loss = torch.tensor(0.0, device=device)
+
             optimizer.zero_grad(set_to_none=True)
             y_pred = model(x)
             data_loss = criterion(y_pred, y)
@@ -185,12 +201,12 @@ def train_loop(model, optimizer, num_steps, k, dataloader, device,
             # Only activate after transient (optional, avoids early noise)
             if enable_flossing:
                 # FIXME currently not actually training the gradients
-                lyapunov_loss = 0.0
+
                 total_loss = data_loss + curv_coeff * (lyapunov_loss if step >= nStepTransient else 0.0)
             else:
                 total_loss = data_loss
 
-            total_loss.backward()
+            total_loss.backward(retain_graph=True)
             optimizer.step()
 
             if enable_flossing:
@@ -201,6 +217,9 @@ def train_loop(model, optimizer, num_steps, k, dataloader, device,
                     Q = Q.detach()
 
             running_loss += data_loss.item()
+            running_loss_lyapunov += lyapunov_loss.item()
+            running_loss_data += data_loss.item()
+
             n_batches += 1
             step += 1
 
@@ -212,10 +231,16 @@ def train_loop(model, optimizer, num_steps, k, dataloader, device,
         lyapunov_exponents.append(lyapunov_spectrum.detach().cpu())
 
         loss_all.append(running_loss / max(1, n_batches))
+        loss_data.append(running_loss_data / max(1, n_batches))
+        loss_lyapunov.append(running_loss_lyapunov / max(1, n_batches))
 
         if enable_flossing:
-            print(
-                f"[epoch {epoch + 1:03d}] loss={loss_all[-1]:.6f} max={lyapunov_spectrum.max()} min={lyapunov_spectrum.min()}")
+            if train_flossing:
+                print(
+                    f"[epoch {epoch + 1:03d}] loss={loss_all[-1]:.6f} loss_d={loss_data[-1]:.6f} loss_l={loss_lyapunov[-1]:.6f} max={lyapunov_spectrum.max()} min={lyapunov_spectrum.min()}")
+            else:
+                print(
+                    f"[epoch {epoch + 1:03d}] loss={loss_all[-1]:.6f} loss_d={loss_data[-1]:.6f} max={lyapunov_spectrum.max()} min={lyapunov_spectrum.min()}")
         else:
             print(f"[epoch {epoch + 1:03d}] loss={loss_all[-1]:.6f}")
 
@@ -224,6 +249,8 @@ def train_loop(model, optimizer, num_steps, k, dataloader, device,
 
     results = {
         'loss_all': loss_all,
+        'loss_data': loss_data,
+        'loss_lyapunov': loss_lyapunov,
         'lyapunov_exponents': lyapunov_exponents,
         'Qs': Qs,
     }
@@ -269,7 +296,7 @@ def main():
 
         # Run training with Hessian diagnostics
         results = train_loop(
-            linear_network, optimizer, Ef, nle, dataloader, device, nstepONS, enable_flossing=True
+            linear_network, optimizer, Ef, nle, dataloader, device, nstepONS, enable_flossing=True, train_flossing=False
         )
 
         torch.save(results, result_file)
