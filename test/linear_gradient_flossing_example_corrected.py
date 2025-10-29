@@ -137,7 +137,7 @@ def train_loop(model, optimizer, num_steps, k, dataloader, device,
             y = y.to(device)
 
             if enable_flossing:
-                print(f"[epoch {epoch + 1:03d}][step {step:03d}] Lyapunov Exponents")
+                # print(f"[epoch {epoch + 1:03d}][step {step:03d}] Lyapunov Exponents")
 
                 params = live_params_dict()
 
@@ -186,7 +186,7 @@ def train_loop(model, optimizer, num_steps, k, dataloader, device,
             if enable_flossing:
                 # FIXME currently not actually training the gradients
                 lyapunov_loss = 0.0
-                total_loss = data_loss + (lyapunov_loss if step >= nStepTransient else 0.0)
+                total_loss = data_loss + curv_coeff * (lyapunov_loss if step >= nStepTransient else 0.0)
             else:
                 total_loss = data_loss
 
@@ -194,7 +194,7 @@ def train_loop(model, optimizer, num_steps, k, dataloader, device,
             optimizer.step()
 
             if enable_flossing:
-                Qs.append(Q.detach())
+                Qs.append(Q.detach().cpu())
 
                 # Detach gradient graph
                 with torch.no_grad():
@@ -209,7 +209,7 @@ def train_loop(model, optimizer, num_steps, k, dataloader, device,
         else:
             lyapunov_spectrum = torch.zeros(k)
 
-        lyapunov_exponents.append(lyapunov_spectrum)
+        lyapunov_exponents.append(lyapunov_spectrum.detach().cpu())
 
         loss_all.append(running_loss / max(1, n_batches))
 
@@ -245,6 +245,8 @@ def main():
 
     sample_division = 10
 
+    batch_size = 64
+
     result_file = 'results.pt'
 
     if os.path.exists(result_file):
@@ -252,16 +254,18 @@ def main():
     else:
         # Initialize the Neural Network
         linear_network = Network(Nin, n_hidden, hidden_dim, Nout, device=device).to(device)
-        optimizer = optim.SGD(linear_network.parameters(), lr=1e-1)
+        optimizer = optim.SGD(linear_network.parameters(), lr=1e-2)
 
         # Data
         data_size = 10000
         x_data = torch.linspace(-10, 10, data_size, device=device).reshape(data_size, 1)
         y_data = torch.sin(x_data)  # regression target
         dataset = TensorDataset(x_data, y_data)
-        dataloader = DataLoader(dataset, batch_size=256, shuffle=True, pin_memory=(device == 'cpu'))
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=(device == 'cpu'))
 
-        nstepONS = len(dataset) // sample_division
+        nstepONS = len(dataset) // (batch_size * sample_division)
+
+        print(nstepONS)
 
         # Run training with Hessian diagnostics
         results = train_loop(
@@ -273,53 +277,30 @@ def main():
     losses = results['loss_all']
     x_losses = list(range(len(losses)))
     plt.plot(x_losses, losses)
+    plt.title("Training Loss vs Epoch")
+    plt.xlabel("Epoch")
+    plt.ylabel("Training Loss")
     plt.savefig('losses.png')
     plt.close()
 
     losses = results['lyapunov_exponents'].cpu()
     x_losses = list(range(len(losses)))
     plt.plot(x_losses, losses)
+    plt.title("Lyapunov Exponents vs Epoch")
+    plt.xlabel("Epoch")
+    plt.ylabel("Lyapunov Exponents")
     plt.savefig('lyapunov_exponents.png')
     plt.close()
 
-    losses = results['batch_maxes']
-    x_losses = list(range(len(losses)))
-    plt.plot(x_losses, losses)
-
-    losses = results['batch_mins']
-    x_losses = list(range(len(losses)))
-    plt.plot(x_losses, losses)
-
-    plt.savefig('batch_mins.png')
-    plt.close()
-
     losses = results['lyapunov_exponents'][-1].cpu()
-    x_losses = list(range(len(losses)))
+    x_losses = np.arange(len(losses)) + 1
     plt.scatter(x_losses, losses)
+    plt.plot(x_losses, np.zeros_like(x_losses), linestyle='dashed')
+    plt.title("Final Lyapunov Exponents")
+    plt.xlabel("Lyapunov Exponent index")
+    plt.ylabel("Lyapunov Exponent")
     plt.savefig('final_lyapunov_exponents.png')
     plt.close()
-
-    lyapunov_exponents = results['lyapunov_exponents'].cpu()
-    median_global = torch.median(lyapunov_exponents)
-    q1, q3 = torch.quantile(lyapunov_exponents,
-                            torch.tensor([.25, .75], device=lyapunov_exponents.device, dtype=lyapunov_exponents.dtype))
-    iqr = q3 - q1
-
-    # Robust limit range (±2 IQR around median, typically covers ~95% if symmetric)
-    ymin = median_global - 2 * iqr
-    ymax = median_global + 2 * iqr
-
-    # For x-limits, handle possible changing dimensionality
-    xmax = lyapunov_exponents.shape[1]
-    xlim = (0, xmax)
-
-    # ---- Set up figure -----------------------------------------------------------
-    fig, ax = plt.subplots(figsize=(6, 4))
-    ax.set_xlim(xlim)
-    ax.set_ylim(ymin, ymax)
-    ax.set_xlabel("Index")
-    ax.set_ylabel("Lyapunov exponent")
-    ax.grid(True, alpha=0.3)
 
 
 if __name__ == '__main__':
