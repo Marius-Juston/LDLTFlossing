@@ -1,4 +1,4 @@
-# Code provided by Rainer Engelken, 2025
+# Code provided by Rainer Engelken, 2025 https://arxiv.org/abs/2312.17306
 
 import matplotlib.pyplot as plt
 import numpy as np
