@@ -78,7 +78,7 @@ class Network(nn.Module):
 
 def train_loop(model, optimizer, num_steps, k, dataloader, device,
                nstepONS,
-               curv_coeff=1e-3, nStepTransient=100):
+               curv_coeff=1e-3, nStepTransient=100, enable_flossing=False):
     """
     Curvature-regularized training.
     - Uses k-column block Q (state, no grads across steps).
@@ -123,69 +123,98 @@ def train_loop(model, optimizer, num_steps, k, dataloader, device,
     Q = Q.detach()
 
     step = 0
-    loss_All = []
+    loss_all = []
+    lyapunov_exponents = []
+
+    batch_maxes = []
+    batch_mins = []
 
     for epoch in range(num_steps):
         running_loss = 0.0
         n_batches = 0
 
+        current_max = []
+        current_min = []
+
         for x, y in dataloader:
             x = x.to(device); y = y.to(device)
 
-            # ----- curvature computation for THIS step (graph-contained) -----
-            params = live_params_dict()  # live leaves (requires_grad=True)
+            if enable_flossing:
+                # ----- curvature computation for THIS step (graph-contained) -----
+                params = live_params_dict()  # live leaves (requires_grad=True)
 
-            # HVP on a flat vector
-            def hvp_flat(v_flat_1d):
-                v_tree = tree_unflatten(v_flat_1d, META)
-                Hv_tree = compiled_hvp(params, v_tree, x, y)  # depends on params
-                Hv_flat, _ = tree_flatten(Hv_tree)
-                return Hv_flat
+                # HVP on a flat vector
+                def hvp_flat(v_flat_1d):
+                    v_tree = tree_unflatten(v_flat_1d, META)
+                    Hv_tree = compiled_hvp(params, v_tree, x, y)  # depends on params
+                    Hv_flat, _ = tree_flatten(Hv_tree)
+                    return Hv_flat
 
-            lr = optimizer.param_groups[0]['lr']
+                lr = optimizer.param_groups[0]['lr']
 
-            # Batch HVPs on Q's columns (H @ Q)
-            V = Q.T            # (k, D)
-            HQ = vmap(hvp_flat)(V)   # (k, D)
-            HQ = HQ.T          # (D, k)
+                # Batch HVPs on Q's columns (H @ Q)
+                V = Q.T            # (k, D)
+                HQ = vmap(hvp_flat)(V)   # (k, D)
+                HQ = HQ.T          # (D, k)
 
-            # J = 1 - eta * H
-            # J Q = Q - eta * (H @ Q)
+                # J = 1 - eta * H
+                # J Q = Q - eta * (H @ Q)
 
-            # Jacobian action JQ = Q - eta * (H @ Q)
-            JQ = Q - lr * HQ  # differentiable w.r.t. params
+                # Jacobian action JQ = Q - eta * (H @ Q)
+                JQ = Q - lr * HQ  # differentiable w.r.t. params
 
-            # QR factorization (R captures local expansion rates)
-            Q_new, R = torch.linalg.qr(JQ, mode='reduced')  # differentiable
+                # QR factorization (R captures local expansion rates)
+                Q_new, R = torch.linalg.qr(JQ, mode='reduced')  # differentiable
 
-            # Local Lyapunov exponents for this block
-            diag_r = R.diagonal().abs().clamp_min(1e-12)
-            local_exponents = torch.log(diag_r) / (nstepONS * lr)
+                # Local Lyapunov exponents for this block
+                diag_r = R.diagonal().abs().clamp_min(1e-12)
+                local_exponents = torch.log(diag_r) / (nstepONS * lr)
 
-            curv_pen = curv_coeff * local_exponents.pow(2).sum()
+                lyapunov_exponents.append(local_exponents.detach())
+
+                current_max.append(local_exponents.max().item())
+                current_min.append(local_exponents.min().item())
+
+                curv_pen = curv_coeff * local_exponents.square().sum()
 
             optimizer.zero_grad(set_to_none=True)
             y_pred = model(x)
             data_loss = criterion(y_pred, y)
 
             # Only activate after transient (optional, avoids early noise)
-            total_loss = data_loss + 0* (curv_pen if step >= nStepTransient else 0.0)
+            if enable_flossing:
+                total_loss = data_loss + (curv_pen if step >= nStepTransient else 0.0)
+            else:
+                total_loss = data_loss
+
             total_loss.backward()
             optimizer.step()
 
-            # Update Q state for the next step WITHOUT keeping graph history
-            # Otherwise causes
-            with torch.no_grad():
-                Q = Q_new.detach()
+            if enable_flossing:
+                # Update Q state for the next step WITHOUT keeping graph history
+                # Otherwise causes
+                with torch.no_grad():
+                    Q = Q_new.detach()
 
             running_loss += data_loss.item()
             n_batches += 1
             step += 1
 
-        loss_All.append(running_loss / max(1, n_batches))
-        print(f"[epoch {epoch + 1:03d}] loss={loss_All[-1]:.6f}")
+        loss_all.append(running_loss / max(1, n_batches))
 
-    return loss_All, None, None
+
+        if enable_flossing:
+            max_exponent = max(current_max)
+            min_exponent = min(current_min)
+
+            batch_maxes.append(max_exponent)
+            batch_mins.append(min_exponent)
+
+            print(f"[epoch {epoch + 1:03d}] loss={loss_all[-1]:.6f} max={max_exponent} min={min_exponent}")
+        else:
+            print(f"[epoch {epoch + 1:03d}] loss={loss_all[-1]:.6f}")
+
+    return loss_all, lyapunov_exponents, None
 
 
 
@@ -196,14 +225,14 @@ def main():
     # Model parameters
     Nin = 1
     hidden_dim = 64
-    n_hidden = 10
+    n_hidden = 5
     Nout = Nin
     nle = 16  # here used as number of Hutchinson probes
     Ef = 50  # epochs (made smaller for demo)
 
     # Initialize the Neural Network
     linear_network = Network(Nin, n_hidden, hidden_dim, Nout, device=device).to(device)
-    optimizer = optim.SGD(linear_network.parameters(), lr=1e-2)
+    optimizer = optim.SGD(linear_network.parameters(), lr=1e-1)
 
     # Data
     data_size = 10000
@@ -214,7 +243,7 @@ def main():
 
     # Run training with Hessian diagnostics
     losses, top_eigs, traceHs = train_loop(
-        linear_network, optimizer, Ef, nle, dataloader, device, 1
+        linear_network, optimizer, Ef, nle, dataloader, device, 1, enable_flossing=True
     )
 
     # (Optionally) return/plot arrays here
