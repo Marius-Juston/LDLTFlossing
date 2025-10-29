@@ -25,6 +25,7 @@ def load_grid_results(base_dir='../runs/grid_search'):
         L = run['L']
         h = run['hidden_size']
         model_size = run['model_size']
+
         result_path = Path(run['run_dir']) / 'results.npz'
         if not result_path.exists():
             continue
@@ -32,7 +33,13 @@ def load_grid_results(base_dir='../runs/grid_search'):
         data = np.load(result_path, allow_pickle=True)
         meta = data['metadata'].item()
         best_loss = meta.get('best_loss', np.nan)
-        records.append({'L': L, 'hidden': h, 'model_size': model_size, 'best_loss': best_loss})
+
+        data = {'L': L, 'hidden': h, 'model_size': model_size, 'best_loss': best_loss}
+
+        if 'num_interior' in run:
+            data.update({'num_interior': run['num_interior']})
+
+        records.append(data)
 
     df = pd.DataFrame(records)
     df.sort_values(by=['L', 'hidden'], inplace=True)
@@ -66,11 +73,13 @@ def load_runs(base_dir: Path):
         L = int(entry.get("L"))
         hidden = int(entry.get("hidden_size", -1))
         model_size = int(entry.get("model_size", -1))
+        num_interior = int(entry.get("num_interior", -1))
         runs.append({
             "L": L,
             "hidden": hidden,
             "losses": losses,
             "model_size": model_size,
+            "num_interior": num_interior,
             "run_dir": str(run_dir)
         })
 
@@ -92,7 +101,7 @@ def plot_all_runs(runs,
     if network_size:
         L_values = sorted({r['model_size'] if 'model_size' in r else r["L"] * r['hidden'] for r in runs})
     else:
-        L_values = sorted({r["L"] for r in runs})
+        L_values = sorted({r['L'] * r['num_interior'] if 'num_interior' in r else r["L"] for r in runs})
     L_min, L_max = min(L_values), max(L_values)
 
     norm = mpl.colors.Normalize(vmin=L_min, vmax=L_max)
@@ -120,7 +129,7 @@ def plot_all_runs(runs,
         if network_size:
             L = r['model_size'] if 'model_size' in r else r["L"] * r['hidden']
         else:
-            L = r["L"]
+            L = r['L'] * r['num_interior'] if 'num_interior' in r else r["L"]
 
         losses = r["losses"]
         epochs = np.arange(1, len(losses) + 1)
@@ -160,7 +169,7 @@ def plot_all_runs(runs,
     else:
         # choose ~6 ticks
         cbar.set_ticks(np.linspace(L_min, L_max, 6))
-    cbar.ax.tick_params(labelsize=10)
+    # cbar.ax.tick_params(labelsize=10)
 
     # Save outputs
     out_png = out_base.with_suffix(".png")
@@ -169,9 +178,18 @@ def plot_all_runs(runs,
     print(f"Saved: {out_png}")
 
 
-def parameter_plots(stacked=False):
+def parameter_plots(stacked=False, flossing=False):
     # === User-configurable ===
-    BASE_DIR = Path(f"../runs/grid_search{'_stack' if stacked else ''}")  # location of index.json and run folders
+    path = "../runs/grid_search"
+
+    if stacked:
+        path += '_stack'
+
+    if flossing:
+        path += '_flossing'
+
+
+    BASE_DIR = Path(path)  # location of index.json and run folders
     FIGSIZE = (9, 6)
 
     YSCALE_LOG = False  # set False if you prefer linear y-axis
@@ -192,9 +210,22 @@ def parameter_plots(stacked=False):
                   cmap_name=COLORMAP, linewidth=LINEWIDTH, alpha=ALPHA, network_size=True)
 
 
-def plot_grid_results(df, save_path='../runs/grid_search/summary_plot.png', dpi=600):
+def plot_grid_results(stacked=False, flossing=False, dpi=600):
+    foldeR_name = f'grid_search'
+
+    if stacked:
+        foldeR_name += '_stack'
+    if flossing:
+        foldeR_name += '_flossing'
+
     # Create a pivot table (rows=L, cols=hidden)
+    df = load_grid_results(f"../runs/{foldeR_name}")
+
+
     pivot = df.pivot(index='hidden', columns='L', values='best_loss')
+
+    if 'num_interior' in  df.columns:
+        pivot.columns *= df['num_interior'][0]
 
     plt.figure(figsize=(6, 4))
     sns.set_context("paper")
@@ -210,6 +241,8 @@ def plot_grid_results(df, save_path='../runs/grid_search/summary_plot.png', dpi=
     plt.ylabel("Hidden Layer Size (H)")
     plt.title("Deep Lipschitz ResNet Performance")
 
+    save_path = f'../runs/{foldeR_name}/summary_plot.png'
+
     plt.tight_layout()
     plt.savefig(save_path, dpi=dpi, bbox_inches='tight')
     plt.close()
@@ -218,9 +251,9 @@ def plot_grid_results(df, save_path='../runs/grid_search/summary_plot.png', dpi=
 
 if __name__ == "__main__":
     stacked = False
+    flossing = True
 
-    df = load_grid_results(f"../runs/grid_search{'_stack' if stacked else ''}")
-    print(df)
-    plot_grid_results(df, dpi=DPI)
 
-    parameter_plots(stacked)
+    plot_grid_results(stacked=stacked, flossing=flossing, dpi=DPI)
+
+    parameter_plots(stacked, flossing)

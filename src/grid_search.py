@@ -1,13 +1,14 @@
 import json
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import torch
 
-from linear_train import train
+from linear_train import train, FlossingConfig
 from models.linear_model import DeepLipschitzSequential, DeepLipschitzSequentialStack
 
 
@@ -30,6 +31,10 @@ def worker_run(task):
     base_save_dir = Path(task['base_save_dir'])
     dtype = torch.float32
 
+    flossing_config = task['flossing_config']
+
+    L_actual = L if stack else L * num_interior
+
     # assign device
     if torch.cuda.is_available():
         device = torch.device(f'cuda:{device_id}')
@@ -50,7 +55,7 @@ def worker_run(task):
         model = DeepLipschitzSequentialStack(input_features, output_features, num_layers=L,
                                              num_interior_layers=num_interior, num_hidden=hidden_size, device=device)
     else:
-        model = DeepLipschitzSequential(input_features, output_features, (hidden_size,) * (L * num_interior),
+        model = DeepLipschitzSequential(input_features, output_features, (hidden_size,) * L_actual,
                                         device=device)
 
     model_size = sum([p.numel() for p in model.parameters() if p.requires_grad])
@@ -82,7 +87,8 @@ def worker_run(task):
                                                            termination_error=1e-4,
                                                            epochs=epochs,
                                                            theoretical_lower=0,
-                                                           logging_frequency=100)
+                                                           logging_frequency=100,
+                                                           flossing_config=flossing_config)
     except Exception as e:
         # collect exception info and save a small json in run_dir
         err_info = {
@@ -90,9 +96,11 @@ def worker_run(task):
             'exception': repr(e),
             'L': L,
             'hidden_size': hidden_size,
+            'L_actual': L_actual,
             'device_id': device_id,
             'timestamp': timestamp,
-            'model_size': model_size
+            'model_size': model_size,
+            'flossing_config': asdict(flossing_config)
         }
         (run_dir / 'error.json').write_text(json.dumps(err_info, indent=2))
         return err_info
@@ -101,11 +109,14 @@ def worker_run(task):
     out = {
         'L': L,
         'hidden_size': hidden_size,
+        'num_interior': num_interior,
+        'L_actual': L_actual,
         'device_id': device_id,
         'best_loss': None if best_loss is None else float(best_loss),
         'best_epoch': None if best_epoch is None else int(best_epoch),
         'save_folder': str(save_folder.absolute()),
-        'model_size': model_size
+        'model_size': model_size,
+        'flossing_config': asdict(flossing_config)
     }
 
     # convert losses into a numpy array and save them
@@ -124,7 +135,7 @@ def worker_run(task):
 
 def grid_search(L_start=3, L_end=15, L_step=2, hidden=(8, 16, 32, 64, 128),
                 epochs=20, batch_size=64, lr=1e-4, base_save_dir='../runs/grid_search',
-                num_gpus=4, num_interior=5, stack=False):
+                num_gpus=4, num_interior=5, stack=False, flossing=False):
     """
     Orchestrates a grid search over L in [L_start..L_end] step L_step and hidden sizes.
     Uses up to `num_gpus` processes in parallel (round-robin GPU assignment).
@@ -133,9 +144,20 @@ def grid_search(L_start=3, L_end=15, L_step=2, hidden=(8, 16, 32, 64, 128),
     if stack:
         base_save_dir += '_stack'
 
+    if flossing:
+        base_save_dir += '_flossing'
+
     base_save_dir = Path(base_save_dir)
 
     base_save_dir.mkdir(parents=True, exist_ok=True)
+
+    if flossing:
+        flossing_config = FlossingConfig()
+
+        flossing_config.enabled = flossing
+    else:
+        flossing_config = None
+
 
     # Build task list
     L_values = list(range(L_start, L_end + 1, L_step))
@@ -152,6 +174,7 @@ def grid_search(L_start=3, L_end=15, L_step=2, hidden=(8, 16, 32, 64, 128),
                 'base_save_dir': str(base_save_dir.absolute()),
                 'stack': stack,
                 'num_interior': num_interior,
+                'flossing_config': flossing_config
             })
 
     # assign device ids round-robin
@@ -180,6 +203,7 @@ def grid_search(L_start=3, L_end=15, L_step=2, hidden=(8, 16, 32, 64, 128),
                     'status': 'exception',
                     'exception': repr(e),
                     'L': task['L'],
+                    'num_interior': task['num_interior'],
                     'hidden_size': task['hidden_size'],
                     'device_id': task['device_id']
                 }
@@ -197,5 +221,8 @@ def grid_search(L_start=3, L_end=15, L_step=2, hidden=(8, 16, 32, 64, 128),
 
 
 if __name__ == '__main__':
-    grid_search(L_start=3, L_end=15, L_step=2, hidden=(8, 16, 32, 64, 128), epochs=20,
-                batch_size=64, lr=1e-4, base_save_dir='../runs/grid_search', num_gpus=4, stack=False, num_interior=5)
+    # grid_search(L_start=3, L_end=13, L_step=2, hidden=(8, 16, 32, 64, 128), epochs=20,
+    #             batch_size=64, lr=1e-4, base_save_dir='../runs/grid_search', num_gpus=4, stack=False, num_interior=4)
+
+    grid_search(L_start=3, L_end=13, L_step=2, hidden=(8, 16, 32, 64, 128), epochs=20,
+                batch_size=64, lr=1e-4, base_save_dir='../runs/grid_search', num_gpus=4, stack=False, num_interior=4, flossing=True)
