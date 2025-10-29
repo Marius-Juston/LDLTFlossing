@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import torch.optim as optim
 from torch import nn
-from torch.func import functional_call, jacrev, jvp
+from torch.func import functional_call, jacrev, jvp, vmap
 from torch.utils.data import TensorDataset, DataLoader
 
 DPI = 600
@@ -76,136 +76,117 @@ class Network(nn.Module):
         return len(self.model)
 
 
-def train_loop(model, optimizer, num_steps, k, dataloader, device, learning_rate, nstepONS):
+def train_loop(model, optimizer, num_steps, k, dataloader, device,
+               nstepONS,
+               curv_coeff=1e-3, nStepTransient=100):
     """
-    Adds scalable Hessian integration:
-      - HVP via forward-over-reverse: jvp(jacrev(loss))(params)[v]
-      - Power iteration for the largest eigenvalue (spectral norm of Hessian)
-      - Hutchinson trace estimator (batched vmap of HVPs)
+    Curvature-regularized training.
+    - Uses k-column block Q (state, no grads across steps).
+    - JQ = Q - eta * (H @ Q), with H@Q computed via k HVPs (batched by vmap).
+    - QR factorization of JQ yields R; local Lyapunov exponents ~ log|diag(R)| / (nstepONS*eta).
+    - Penalize positive exponents (pushes toward stable parameter dynamics).
 
-    k is used as the number of Hutchinson probes.
+    curv_coeff: strength of the curvature penalty.
+    nStepTransient: start regularization after this many steps.
     """
+
     model.train()
     criterion = nn.MSELoss(reduction='mean')
 
-    # --- Buffers once (e.g., BatchNorm running stats; usually empty here) ---
+    # Buffers (usually empty here)
     BUFFERS = dict(model.named_buffers())
 
-    # --- Pure functional loss(params, x, y) ---
+    # Pure functional loss(params, x, y)
     def loss_fn(params, x, y):
-        # functional_call takes a mapping of parameter & buffer names -> tensors
         logits = functional_call(model, ({**params, **BUFFERS}), (x,))
         return criterion(logits, y)
 
-    # --- Hessian-vector product oracle: jvp(jacrev(loss)) ---
+    # HVP oracle: forward-over-reverse jvp(jacrev(.))
     def hvp_pytree(params, vparams, x, y):
-        # jacrev(loss_fn) returns gradient wrt params; jvp gives directional derivative
-        grad_fn = jacrev(lambda p: loss_fn(p, x, y))
-        _, Hv = jvp(grad_fn, (params,), (vparams,))
+        g = jacrev(lambda p: loss_fn(p, x, y))   # gradient wrt params
+        _, Hv = jvp(g, (params,), (vparams,))    # directional derivative
         return Hv
 
-    # Compile for repeated use (PyTorch 2.9 has faster/steadier compile)
-    compiled_loss = torch.compile(loss_fn, fullgraph=True)
-    compiled_hvp = torch.compile(hvp_pytree, fullgraph=True)
+    compiled_hvp = hvp_pytree
 
-    # ---- helpers: flat <-> pytree on a reference param dict ----
-    def current_params_dict():
-        # clone & require grad so the functional AD sees leaves
-        return {k: p.detach().clone().requires_grad_(True) for k, p in model.named_parameters()}
+    # Live (leaf) params dict; DO NOT detach/clone — we need 3rd-order grads
+    def live_params_dict():
+        return {k: p for k, p in model.named_parameters()}
 
-    params = current_params_dict()  # freeze a view of current params
-    flat_template, META = tree_flatten(params)
+    # Build META once (param shapes don't change)
+    params0 = live_params_dict()
+    flat0, META = tree_flatten(params0)
+    D = flat0.numel()
 
-    D = flat_template.numel()
-
+    # Q is persistent state across steps; keep it detached (no history between steps)
     Q, _ = torch.linalg.qr(torch.randn((D, k), device=device))
-
-    I = torch.ones(D, device=device)
-
-    # --- Arrays to log ---
-    loss_All = np.zeros(num_steps, dtype=np.float64)
-    top_eig_All = np.zeros(num_steps, dtype=np.float64)
-    traceH_All = np.zeros(num_steps, dtype=np.float64)
-
-    nStepTransient = 100
-    LS = torch.zeros(k, device=device)
-    LSall = []
-    loss_All = []
-    normdhAll = []
-    lsidx = -1
-    total_time_for_exponents = 0
+    Q = Q.detach()
 
     step = 0
+    loss_All = []
 
-    # --- Training epochs ---
     for epoch in range(num_steps):
-
         running_loss = 0.0
         n_batches = 0
 
         for x, y in dataloader:
-            # Standard training step
-            optimizer.zero_grad(set_to_none=True)
+            x = x.to(device); y = y.to(device)
 
-            x = x.to(device)
-            y = y.to(device)
+            # ----- curvature computation for THIS step (graph-contained) -----
+            params = live_params_dict()  # live leaves (requires_grad=True)
 
-            # ----- Curvature diagnostics at the END of the epoch -----
-            params = current_params_dict()  # freeze a view of current params
-            flat_template, META = tree_flatten(params)
-
-            def hvp_flat(v_flat):
-                v_tree = tree_unflatten(v_flat, META)
-                Hv_tree = compiled_hvp(params, v_tree, x, y)
+            # HVP on a flat vector
+            def hvp_flat(v_flat_1d):
+                v_tree = tree_unflatten(v_flat_1d, META)
+                Hv_tree = compiled_hvp(params, v_tree, x, y)  # depends on params
                 Hv_flat, _ = tree_flatten(Hv_tree)
                 return Hv_flat
 
-            lyapunov_exponents = torch.zeros(k, device=device)
+            lr = optimizer.param_groups[0]['lr']
 
-            if step >= nStepTransient:
-                print(f"[epoch {epoch + 1:03d}][step {step + 1:03d}] Computing the Hessian")
-                hessian = hvp_flat(flat_template)
+            # Batch HVPs on Q's columns (H @ Q)
+            V = Q.T            # (k, D)
+            HQ = vmap(hvp_flat)(V)   # (k, D)
+            HQ = HQ.T          # (D, k)
 
-                J = I - learning_rate * hessian
+            # J = 1 - eta * H
+            # J Q = Q - eta * (H @ Q)
 
-                Q = torch.diag(J) @ Q
+            # Jacobian action JQ = Q - eta * (H @ Q)
+            JQ = Q - lr * HQ  # differentiable w.r.t. params
 
-                if (step + 1) % nstepONS == 0:
-                    print(f"[epoch {epoch + 1:03d}][step {step + 1:03d}] Renormalizing")
-                    lsidx += 1
-                    Q, r = torch.linalg.qr(Q)
+            # QR factorization (R captures local expansion rates)
+            Q_new, R = torch.linalg.qr(JQ, mode='reduced')  # differentiable
 
-                    diag_r = torch.abs(torch.diag(r))
-                    diag_r[diag_r == 0] = 1e-16
-                    local_exponents = torch.log(diag_r) / (nstepONS * learning_rate)
-                    LSall.append(local_exponents.detach())
-                    LS += torch.log(diag_r)
-                    total_time_for_exponents += nstepONS * learning_rate
+            # Local Lyapunov exponents for this block
+            diag_r = R.diagonal().abs().clamp_min(1e-12)
+            local_exponents = torch.log(diag_r) / (nstepONS * lr)
 
-                    lyapunov_exponents = local_exponents
+            curv_pen = curv_coeff * local_exponents.pow(2).sum()
 
-
+            optimizer.zero_grad(set_to_none=True)
             y_pred = model(x)
+            data_loss = criterion(y_pred, y)
 
-            loss = criterion(y_pred, y)
-
-            lyapunov_loss = lyapunov_exponents.square().sum()
-
-            total_loss = loss + lyapunov_loss
-
+            # Only activate after transient (optional, avoids early noise)
+            total_loss = data_loss + 0* (curv_pen if step >= nStepTransient else 0.0)
             total_loss.backward()
             optimizer.step()
 
-            running_loss += loss.item()
-            n_batches += 1
+            # Update Q state for the next step WITHOUT keeping graph history
+            # Otherwise causes
+            with torch.no_grad():
+                Q = Q_new.detach()
 
+            running_loss += data_loss.item()
+            n_batches += 1
             step += 1
 
-        loss_All.append( running_loss / max(1, n_batches))
+        loss_All.append(running_loss / max(1, n_batches))
+        print(f"[epoch {epoch + 1:03d}] loss={loss_All[-1]:.6f}")
 
-        print(f"[epoch {epoch + 1:03d}] loss={loss_All[epoch]:.6f}")
+    return loss_All, None, None
 
-    return loss_All, top_eig_All, traceH_All
 
 
 def main():
@@ -213,7 +194,7 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     # Model parameters
-    Nin = 10
+    Nin = 1
     hidden_dim = 64
     n_hidden = 10
     Nout = Nin
@@ -225,15 +206,15 @@ def main():
     optimizer = optim.SGD(linear_network.parameters(), lr=1e-2)
 
     # Data
-    data_size = 2048
-    x_data = torch.randn(data_size, Nin, device=device)
+    data_size = 10000
+    x_data = torch.linspace(-10, 10, data_size, device=device).reshape(data_size, 1)
     y_data = torch.sin(x_data)  # regression target
     dataset = TensorDataset(x_data, y_data)
     dataloader = DataLoader(dataset, batch_size=256, shuffle=True, pin_memory=(device == 'cpu'))
 
     # Run training with Hessian diagnostics
     losses, top_eigs, traceHs = train_loop(
-        linear_network, optimizer, Ef, nle, dataloader, device, 0.01, 1
+        linear_network, optimizer, Ef, nle, dataloader, device, 1
     )
 
     # (Optionally) return/plot arrays here
