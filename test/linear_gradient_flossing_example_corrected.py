@@ -95,37 +95,31 @@ def train_loop(model, optimizer, num_steps, k, dataloader, device,
     model.train()
     criterion = nn.MSELoss(reduction='mean')
 
-    # Buffers (usually empty here)
     BUFFERS = dict(model.named_buffers())
 
-    # Pure functional loss(params, x, y)
     def loss_fn(params, x, y):
         logits = functional_call(model, ({**params, **BUFFERS}), (x,))
         return criterion(logits, y)
 
-    # HVP oracle: forward-over-reverse jvp(jacrev(.))
     def hvp_pytree(params, vparams, x, y):
-        g = jacrev(lambda p: loss_fn(p, x, y))  # gradient wrt params
-        _, Hv = jvp(g, (params,), (vparams,))  # directional derivative
+        g = jacrev(lambda p: loss_fn(p, x, y))
+        _, Hv = jvp(g, (params,), (vparams,))
         return Hv
 
     compiled_hvp = hvp_pytree
 
-    # Live (leaf) params dict; DO NOT detach/clone — we need 3rd-order grads
     def live_params_dict():
         return {k: p for k, p in model.named_parameters()}
 
-    # Build META once (param shapes don't change)
     params0 = live_params_dict()
     flat0, META = tree_flatten(params0)
     D = flat0.numel()
 
-    # Q is persistent state across steps; keep it detached (no history between steps)
     Q, _ = torch.linalg.qr(torch.randn((D, k), device=device))
     Q = Q.detach()
 
-    S = torch.zeros(k, device=device)  # cumulative sum of logs
-    tacc = 0.0  # accumulated "time" (eta * steps)
+    S = torch.zeros(k, device=device)
+    tacc = 0.0
     steps_since_transient = 0
 
     step = 0
@@ -145,8 +139,7 @@ def train_loop(model, optimizer, num_steps, k, dataloader, device,
             if enable_flossing:
                 print(f"[epoch {epoch + 1:03d}][step {step:03d}] Lyapunov Exponents")
 
-                # ----- curvature computation for THIS step (graph-contained) -----
-                params = live_params_dict()  # live leaves (requires_grad=True)
+                params = live_params_dict()
 
                 # HVP on a flat vector
                 def hvp_flat(v_flat_1d):
@@ -169,22 +162,18 @@ def train_loop(model, optimizer, num_steps, k, dataloader, device,
                 JQ_step = Q - lr * HQ  # differentiable w.r.t. params
 
                 with torch.no_grad():
-                    Q = JQ_step  # do NOT re-orthonormalize yet
+                    Q = JQ_step
                 steps_since_transient += 1
 
-                # only after nstepONS steps (and past transient), orthonormalize once:
                 if step >= nStepTransient and (step + 1) % nstepONS == 0:
                     print(f"[epoch {epoch + 1:03d}][step {step:03d}] Normalizing")
 
-                    # QR on the current block-propagated Q
                     Q_new, R = torch.linalg.qr(Q, mode='reduced')
                     diag_r = R.diagonal().abs().clamp_min(1e-12)
 
-                    # accumulate for the asymptotic spectrum
                     S += torch.log(diag_r)
                     tacc += nstepONS * lr
 
-                    # reset basis to the orthonormal Q (do not keep graph)
                     with torch.no_grad():
                         Q = Q_new.detach()
                     steps_since_transient = 0
@@ -195,7 +184,9 @@ def train_loop(model, optimizer, num_steps, k, dataloader, device,
 
             # Only activate after transient (optional, avoids early noise)
             if enable_flossing:
-                total_loss = data_loss + (0.0 if step >= nStepTransient else 0.0)
+                # FIXME currently not actually training the gradients
+                lyapunov_loss = 0.0
+                total_loss = data_loss + (lyapunov_loss if step >= nStepTransient else 0.0)
             else:
                 total_loss = data_loss
 
@@ -204,6 +195,10 @@ def train_loop(model, optimizer, num_steps, k, dataloader, device,
 
             if enable_flossing:
                 Qs.append(Q.detach())
+
+                # Detach gradient graph
+                with torch.no_grad():
+                    Q = Q.detach()
 
             running_loss += data_loss.item()
             n_batches += 1
@@ -248,6 +243,8 @@ def main():
     nle = 16  # here used as number of Hutchinson probes
     Ef = 50  # epochs (made smaller for demo)
 
+    sample_division = 10
+
     result_file = 'results.pt'
 
     if os.path.exists(result_file):
@@ -264,9 +261,11 @@ def main():
         dataset = TensorDataset(x_data, y_data)
         dataloader = DataLoader(dataset, batch_size=256, shuffle=True, pin_memory=(device == 'cpu'))
 
+        nstepONS = len(dataset) // sample_division
+
         # Run training with Hessian diagnostics
         results = train_loop(
-            linear_network, optimizer, Ef, nle, dataloader, device, 1, enable_flossing=True
+            linear_network, optimizer, Ef, nle, dataloader, device, nstepONS, enable_flossing=True
         )
 
         torch.save(results, result_file)
