@@ -59,7 +59,7 @@ class FlossingConfig:
     weight: float = 0.05
     offset: float = 0.0
     stop_criteria: float = -0.2
-    conditioning_steps = 15
+    conditioning_steps = 5
 
 
 def initial_train_condition(training_loader, optimizer, model, tb_writer,
