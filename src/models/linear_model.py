@@ -265,7 +265,7 @@ class DeepLipschitzSequential(nn.Module):
         prev_const = torch.tensor(1.0, **self.factory_kwargs)
 
         for step, layer in enumerate(self.layers):
-            current_input_for_jac = current_input.detach().requires_grad_(True)
+            current_input_for_jac = current_input.requires_grad_(True)
 
             if isinstance(layer, nn.Dropout):
                 layer_out = layer(current_input)
