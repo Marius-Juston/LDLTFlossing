@@ -79,15 +79,16 @@ def worker_run(task):
     tensorboard_log_folder = run_dir / 'logs'
 
     # call train (this will save best.pt inside some save_folder)
-    error, save_folder, best_loss, best_epoch, losses, running_lyapunov_exponents, conditional_lyaponov_exponents = train(x, y, model,
-                                                                                          logging_folder=tensorboard_log_folder,
-                                                                                          batch_size=batch_size,
-                                                                                          lr=lr,
-                                                                                          termination_error=1e-4,
-                                                                                          epochs=epochs,
-                                                                                          theoretical_lower=0,
-                                                                                          logging_frequency=100,
-                                                                                          flossing_config=flossing_config)
+    error, save_folder, best_loss, best_epoch, losses, running_lyapunov_exponents, conditional_lyaponov_exponents = train(
+        x, y, model,
+        logging_folder=tensorboard_log_folder,
+        batch_size=batch_size,
+        lr=lr,
+        termination_error=1e-4,
+        epochs=epochs,
+        theoretical_lower=0,
+        logging_frequency=100,
+        flossing_config=flossing_config)
 
     if error is not None:
         # collect exception info and save a small json in run_dir

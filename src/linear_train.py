@@ -127,7 +127,9 @@ def initial_train_condition(training_loader, optimizer, model, tb_writer,
 
                 tb_writer.add_scalar('Conditioned Loss/Flossing Max', running_max_le, tb_x)
 
-                print('  batch {} step {} flossing (max: {}): {}'.format(batch_index + 1,global_step + 1, last_loss, running_max_le))
+                print(
+                    '  batch {} step {} flossing (max: {}): {}'.format(batch_index + 1, global_step + 1, running_max_le,
+                                                                       last_loss))
 
                 running_max_le = None
                 running_loss = 0.
@@ -135,7 +137,8 @@ def initial_train_condition(training_loader, optimizer, model, tb_writer,
                 log_all(tb_writer, model.named_parameters(), tb_x, prefix="Conditioned")
 
             if stop:
-                print(f"Early termination since the max Lyapunov exponent within the stopping criteria {flossing_loss} max: {running_max_le}")
+                print(
+                    f"Early termination since the max Lyapunov exponent within the stopping criteria {flossing_loss} max: {running_max_le}")
                 break
 
             global_step += 1
@@ -318,7 +321,8 @@ def train(x, y, model: DeepLipschitzLinearResNet, flossing_config: Optional[Flos
 
     if flossing_config.conditioning_steps > 0 and flossing_config.enabled:
         try:
-            conditioned_lyapunov_exponents = initial_train_condition(training_loader, optimizer, model, writer, flossing_config,  logging_frequency)
+            conditioned_lyapunov_exponents = initial_train_condition(training_loader, optimizer, model, writer,
+                                                                     flossing_config, logging_frequency)
 
             if len(conditioned_lyapunov_exponents) > 0:
                 conditioned_lyapunov_exponents = torch.vstack(conditioned_lyapunov_exponents).tolist()
@@ -401,7 +405,7 @@ def train(x, y, model: DeepLipschitzLinearResNet, flossing_config: Optional[Flos
 
         epoch_number += 1
 
-    if len(running_lyapunov_exponents)> 0:
+    if len(running_lyapunov_exponents) > 0:
         running_lyapunov_exponents = torch.vstack(running_lyapunov_exponents).tolist()
 
     return error, save_folder, best_loss, best_epoch, losses, running_lyapunov_exponents, conditioned_lyapunov_exponents
@@ -458,10 +462,10 @@ def sine_training(L=10, hidden=64, epochs=20, device_id: int = 0):
     y = torch.sin(x + variation)
     theoretical_lower = 0
 
-    _, _, _, _, losses, _ , _ = train(x, y, model, learning_prefix='sine', batch_size=batch, termination_error=1e-4,
-                                  lr=1e-4,
-                                  theoretical_lower=theoretical_lower,
-                                  epochs=epochs)
+    _, _, _, _, losses, _, _ = train(x, y, model, learning_prefix='sine', batch_size=batch, termination_error=1e-4,
+                                     lr=1e-4,
+                                     theoretical_lower=theoretical_lower,
+                                     epochs=epochs)
 
     return losses
 
@@ -506,9 +510,9 @@ def sine_training_flossing(L=10, hidden=64, epochs=20, device_id: int = 0):
     flossing_config = FlossingConfig(enabled=True, flossing_frequency=1, weight=0.1, enable_logging=True)
 
     _, _, _, _, losses, _, _ = train(x, y, model, flossing_config=flossing_config, learning_prefix='sine_flossing',
-                                  batch_size=batch, termination_error=1e-4, lr=1e-4,
-                                  theoretical_lower=theoretical_lower,
-                                  epochs=epochs)
+                                     batch_size=batch, termination_error=1e-4, lr=1e-4,
+                                     theoretical_lower=theoretical_lower,
+                                     epochs=epochs)
 
     return losses
 
@@ -551,10 +555,11 @@ def sine_training_grouped(L=2, hidden=64, L_int=4, epochs=20, device_id: int = 0
     y = torch.sin(x + variation)
     theoretical_lower = 0
 
-    _, _, _, _, losses, _ , _ = train(x, y, model, learning_prefix='sine_stacked', batch_size=batch, termination_error=1e-4,
-                                  lr=1e-4,
-                                  theoretical_lower=theoretical_lower,
-                                  epochs=epochs)
+    _, _, _, _, losses, _, _ = train(x, y, model, learning_prefix='sine_stacked', batch_size=batch,
+                                     termination_error=1e-4,
+                                     lr=1e-4,
+                                     theoretical_lower=theoretical_lower,
+                                     epochs=epochs)
 
     return losses
 

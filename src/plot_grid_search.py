@@ -188,7 +188,6 @@ def parameter_plots(stacked=False, flossing=False):
     if flossing:
         path += '_flossing'
 
-
     BASE_DIR = Path(path)  # location of index.json and run folders
     FIGSIZE = (9, 6)
 
@@ -221,10 +220,9 @@ def plot_grid_results(stacked=False, flossing=False, dpi=600):
     # Create a pivot table (rows=L, cols=hidden)
     df = load_grid_results(f"../runs/{foldeR_name}")
 
-
     pivot = df.pivot(index='hidden', columns='L', values='best_loss')
 
-    if 'num_interior' in  df.columns:
+    if 'num_interior' in df.columns:
         pivot.columns *= df['num_interior'][0]
 
     plt.figure(figsize=(6, 4))
@@ -252,7 +250,6 @@ def plot_grid_results(stacked=False, flossing=False, dpi=600):
 if __name__ == "__main__":
     stacked = False
     flossing = True
-
 
     plot_grid_results(stacked=stacked, flossing=flossing, dpi=DPI)
 
