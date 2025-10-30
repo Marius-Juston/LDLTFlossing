@@ -134,7 +134,7 @@ def initial_train_condition(training_loader, optimizer, model, tb_writer,
                 tb_writer.add_scalar('Conditioned Loss/Flossing Max', running_max_le, tb_x)
 
                 current_average = average_running_max / batch_numbers
-                tb_writer.add_scalar('Conditioned Loss/Flossing Average', running_max_le, current_average)
+                tb_writer.add_scalar('Conditioned Loss/Flossing Average', current_average, tb_x)
 
                 print(
                     '  batch {} step {} flossing (max: {} average: {}): {}'.format(batch_index + 1, global_step + 1,
