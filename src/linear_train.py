@@ -57,8 +57,8 @@ class FlossingConfig:
     flossing_le: int = 1
     num_sample_trajectories: int = 300
     weight: float = 0.05
-    offset: float = 0.15
-    stop_criteria: float = -0.75
+    offset: float = 0.0
+    stop_criteria: float = -0.2
     conditioning_steps = 15
 
 
@@ -69,7 +69,6 @@ def initial_train_condition(training_loader, optimizer, model, tb_writer,
         "Initially generating a conditioning of the model to move the Lyapunov exponents to a regime before the actual training")
 
     running_loss = 0.
-    last_loss = 0.
 
     running_max_le = None
 
@@ -80,6 +79,11 @@ def initial_train_condition(training_loader, optimizer, model, tb_writer,
     global_step = 0
 
     for epoch_index in range(flossing_config.conditioning_steps):
+        print('epoch {}', epoch_index)
+
+        average_running_max = 0
+
+        batch_numbers = 0
 
         for batch_index, data in enumerate(training_loader):
             # Every data instance is an input + label pair
@@ -97,15 +101,17 @@ def initial_train_condition(training_loader, optimizer, model, tb_writer,
 
             lyponov_exponents.append(le.detach())
 
+            current_max = le.max().item()
+
             if running_max_le is None:
-                running_max_le = le.max().item()
+                running_max_le = current_max
             else:
-                running_max_le = max(running_max_le, le.max().item())
+                running_max_le = max(running_max_le, current_max)
+
+            average_running_max += current_max
+            batch_numbers += 1
 
             flossing_loss = torch.square(le + flossing_config.offset).mean()
-
-            if abs(running_max_le) <= flossing_config.stop_criteria:
-                stop = True
 
             loss = flossing_loss
 
@@ -136,12 +142,16 @@ def initial_train_condition(training_loader, optimizer, model, tb_writer,
 
                 log_all(tb_writer, model.named_parameters(), tb_x, prefix="Conditioned")
 
-            if stop:
-                print(
-                    f"Early termination since the max Lyapunov exponent within the stopping criteria {flossing_loss} max: {running_max_le}")
-                break
-
             global_step += 1
+
+        epoch_average = average_running_max / batch_numbers
+
+        print('epoch {} average max {}', epoch_index, epoch_average)
+
+        if abs(epoch_average) <= abs(flossing_config.stop_criteria):
+            print(
+                f"Early termination since the max Lyapunov exponent within the stopping criteria {flossing_config.stop_criteria} max: {epoch_average}")
+            break
 
     print("Finished flossing conditioning")
 
