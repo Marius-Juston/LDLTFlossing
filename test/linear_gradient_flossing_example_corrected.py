@@ -244,8 +244,11 @@ def train_loop(model, optimizer, num_steps, k, dataloader, device,
         else:
             print(f"[epoch {epoch + 1:03d}] loss={loss_all[-1]:.6f}")
 
-    lyapunov_exponents = torch.stack(lyapunov_exponents)
-    Qs = torch.stack(Qs)
+    if len(lyapunov_exponents)> 0:
+        lyapunov_exponents = torch.stack(lyapunov_exponents)
+
+    if len(Qs) > 0:
+        Qs = torch.stack(Qs)
 
     results = {
         'loss_all': loss_all,

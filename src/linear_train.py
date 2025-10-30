@@ -2,12 +2,12 @@ import dataclasses
 import os
 import traceback
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, Optional, Iterator, Tuple
 
 import torch
 from matplotlib import pyplot as plt
 from prettytable import PrettyTable
-from torch.nn import MSELoss
+from torch.nn import MSELoss, Parameter
 from torch.utils.data import TensorDataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
@@ -59,6 +59,90 @@ class FlossingConfig:
     weight: float = 0.05
     offset: float = 0.15
     stop_criteria: float = -0.75
+    conditioning_steps = 15
+
+
+def initial_train_condition(training_loader, optimizer, model, tb_writer,
+                            flossing_config: FlossingConfig,
+                            logging_frequency=100):
+    print(
+        "Initially generating a conditioning of the model to move the Lyapunov exponents to a regime before the actual training")
+
+    running_loss = 0.
+    last_loss = 0.
+
+    running_max_le = None
+
+    lyponov_exponents = []
+
+    stop = False
+
+    global_step = 0
+
+    for epoch_index in range(flossing_config.conditioning_steps):
+
+        for batch_index, data in enumerate(training_loader):
+            # Every data instance is an input + label pair
+            inputs, labels = data
+
+            if hasattr(model, 'in_features'):
+                inputs = inputs.reshape((-1, model.in_features))
+
+            # Zero your gradients for every batch!
+            optimizer.zero_grad(set_to_none=True)
+
+            le, outputs = model.calculate_lyapunov_spectrum(inputs, nle=flossing_config.flossing_le,
+                                                            n_random_samples=flossing_config.num_sample_trajectories,
+                                                            normalization_frequency=flossing_config.flossing_frequency)
+
+            lyponov_exponents.append(le.detach())
+
+            if running_max_le is None:
+                running_max_le = le.max().item()
+            else:
+                running_max_le = max(running_max_le, le.max().item())
+
+            flossing_loss = torch.square(le + flossing_config.offset).mean()
+
+            if abs(running_max_le) <= flossing_config.stop_criteria:
+                stop = True
+
+            loss = flossing_loss
+
+            loss.backward()
+
+            # Adjust learning weights
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0, foreach=True)
+            optimizer.step()
+
+            # Gather data and report
+            running_loss += loss.item()
+
+            # print("Current loss:", loss.item())
+            if global_step % logging_frequency == logging_frequency - 1 or stop:
+                last_loss = running_loss / logging_frequency  # loss per batch
+
+                tb_x = global_step
+                tb_writer.add_scalar('Conditioned Loss/Train', last_loss, tb_x)
+
+                tb_writer.add_scalar('Conditioned Loss/Flossing Max', running_max_le, tb_x)
+
+                print('  batch {} step {} flossing (max: {}): {}'.format(batch_index + 1,global_step + 1, last_loss, running_max_le))
+
+                running_max_le = None
+                running_loss = 0.
+
+                log_all(tb_writer, model.named_parameters(), tb_x, prefix="Conditioned")
+
+            if stop:
+                print(f"Early termination since the max Lyapunov exponent within the stopping criteria {flossing_loss} max: {running_max_le}")
+                break
+
+            global_step += 1
+
+    print("Finished flossing conditioning")
+
+    return lyponov_exponents
 
 
 def train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_index, tb_writer, flossing_config: FlossingConfig,
@@ -143,7 +227,7 @@ def train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_index, tb_
                 last_flossing_loss = running_flossing_loss / logging_frequency
 
                 tb_writer.add_scalar('Loss/Flossing', last_flossing_loss, tb_x)
-                tb_writer.add_scalar('Loss/Flossing MAx', running_max_le, tb_x)
+                tb_writer.add_scalar('Loss/Flossing Max', running_max_le, tb_x)
 
                 print('  batch {} loss: {} flossing (max: {}): {} output: {}'.format(i + 1, last_loss, running_max_le,
                                                                                      last_flossing_loss,
@@ -159,12 +243,28 @@ def train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_index, tb_
             running_flossing_loss = 0.0
             running_output_loss = 0.0
 
+            log_all(tb_writer, model.named_parameters(), tb_x)
+
             if hasattr(model, 'A'):
                 alpha_vals = alpha_values(model)
 
                 tb_writer.add_scalars('Training/Alpha', alpha_vals, tb_x, tb_x)
 
     return last_loss, lyponov_exponents
+
+
+@torch.no_grad()
+def log_all(summary_writer, parameters: Iterator[Tuple[str, Parameter]], step, prefix=''):
+    for n, param in parameters:
+        if param.numel() == 1:
+            fnc = summary_writer.add_scalar
+        else:
+            fnc = summary_writer.add_histogram
+
+        if param.requires_grad and param.grad is not None:
+            fnc(f"{prefix} gradients/{n}", param.grad, global_step=step)
+
+        fnc(f"{prefix} values/{n}", param, global_step=step)
 
 
 def train(x, y, model: DeepLipschitzLinearResNet, flossing_config: Optional[FlossingConfig] = None,
@@ -213,6 +313,19 @@ def train(x, y, model: DeepLipschitzLinearResNet, flossing_config: Optional[Flos
     error = None
 
     running_lyapunov_exponents = []
+
+    conditioned_lyapunov_exponents = []
+
+    if flossing_config.conditioning_steps > 0 and flossing_config.enabled:
+        try:
+            conditioned_lyapunov_exponents = initial_train_condition(training_loader, optimizer, model, writer, flossing_config,  logging_frequency)
+
+            if len(conditioned_lyapunov_exponents) > 0:
+                conditioned_lyapunov_exponents = torch.vstack(conditioned_lyapunov_exponents).tolist()
+        except Exception as e:
+            error = e
+
+            return error, save_folder, best_loss, best_epoch, losses, running_lyapunov_exponents, conditioned_lyapunov_exponents
 
     for epoch in range(epochs):
         print('EPOCH {}:'.format(epoch_number + 1))
@@ -288,9 +401,10 @@ def train(x, y, model: DeepLipschitzLinearResNet, flossing_config: Optional[Flos
 
         epoch_number += 1
 
-    running_lyapunov_exponents = torch.stack(running_lyapunov_exponents).tolist()
+    if len(running_lyapunov_exponents)> 0:
+        running_lyapunov_exponents = torch.vstack(running_lyapunov_exponents).tolist()
 
-    return error, save_folder, best_loss, best_epoch, losses, running_lyapunov_exponents
+    return error, save_folder, best_loss, best_epoch, losses, running_lyapunov_exponents, conditioned_lyapunov_exponents
 
 
 def print_num_parameters(model):
@@ -344,7 +458,7 @@ def sine_training(L=10, hidden=64, epochs=20, device_id: int = 0):
     y = torch.sin(x + variation)
     theoretical_lower = 0
 
-    _, _, _, _, losses, _ = train(x, y, model, learning_prefix='sine', batch_size=batch, termination_error=1e-4,
+    _, _, _, _, losses, _ , _ = train(x, y, model, learning_prefix='sine', batch_size=batch, termination_error=1e-4,
                                   lr=1e-4,
                                   theoretical_lower=theoretical_lower,
                                   epochs=epochs)
@@ -389,9 +503,9 @@ def sine_training_flossing(L=10, hidden=64, epochs=20, device_id: int = 0):
     y = torch.sin(x + variation)
     theoretical_lower = 0
 
-    flossing_config = FlossingConfig(enabled=False, flossing_frequency=1, weight=0.1, enable_logging=True)
+    flossing_config = FlossingConfig(enabled=True, flossing_frequency=1, weight=0.1, enable_logging=True)
 
-    _, _, _, _, losses, _ = train(x, y, model, flossing_config=flossing_config, learning_prefix='sine_flossing',
+    _, _, _, _, losses, _, _ = train(x, y, model, flossing_config=flossing_config, learning_prefix='sine_flossing',
                                   batch_size=batch, termination_error=1e-4, lr=1e-4,
                                   theoretical_lower=theoretical_lower,
                                   epochs=epochs)
@@ -437,7 +551,7 @@ def sine_training_grouped(L=2, hidden=64, L_int=4, epochs=20, device_id: int = 0
     y = torch.sin(x + variation)
     theoretical_lower = 0
 
-    _, _, _, _, losses, _ = train(x, y, model, learning_prefix='sine_stacked', batch_size=batch, termination_error=1e-4,
+    _, _, _, _, losses, _ , _ = train(x, y, model, learning_prefix='sine_stacked', batch_size=batch, termination_error=1e-4,
                                   lr=1e-4,
                                   theoretical_lower=theoretical_lower,
                                   epochs=epochs)
@@ -448,5 +562,5 @@ def sine_training_grouped(L=2, hidden=64, L_int=4, epochs=20, device_id: int = 0
 if __name__ == '__main__':
     # sine_training(L=10)
     # sine_training_grouped(L=5)
-    sine_training_flossing(L=5)
+    sine_training_flossing(L=30)
     # main()

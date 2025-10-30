@@ -79,7 +79,7 @@ def worker_run(task):
     tensorboard_log_folder = run_dir / 'logs'
 
     # call train (this will save best.pt inside some save_folder)
-    error, save_folder, best_loss, best_epoch, losses, running_lyapunov_exponents = train(x, y, model,
+    error, save_folder, best_loss, best_epoch, losses, running_lyapunov_exponents, conditional_lyaponov_exponents = train(x, y, model,
                                                                                           logging_folder=tensorboard_log_folder,
                                                                                           batch_size=batch_size,
                                                                                           lr=lr,
@@ -101,7 +101,8 @@ def worker_run(task):
             'timestamp': timestamp,
             'model_size': model_size,
             'flossing_config': asdict(flossing_config),
-            'running_lyapunov_exponents': running_lyapunov_exponents
+            'running_lyapunov_exponents': running_lyapunov_exponents,
+            'conditional_lyaponov_exponents': conditional_lyaponov_exponents
         }
         (run_dir / 'error.json').write_text(json.dumps(err_info, indent=2))
         return err_info
@@ -118,7 +119,8 @@ def worker_run(task):
         'save_folder': str(save_folder.absolute()),
         'model_size': model_size,
         'flossing_config': asdict(flossing_config),
-        'running_lyapunov_exponents': running_lyapunov_exponents
+        'running_lyapunov_exponents': running_lyapunov_exponents,
+        'conditional_lyaponov_exponents': conditional_lyaponov_exponents
     }
 
     # convert losses into a numpy array and save them
