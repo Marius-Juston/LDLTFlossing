@@ -174,6 +174,9 @@ def train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_index, tb_
 
     lyponov_exponents = []
 
+    enabled_flossing = False
+    pre_enabled_flossing = enabled_flossing
+
     # Here, we use enumerate(training_loader) instead of
     # iter(training_loader) so that we can track the batch
     # index and do some intra-epoch reporting
@@ -205,10 +208,21 @@ def train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_index, tb_
 
             output_loss = loss_fn(outputs, labels)
 
-            if flossing_config.weight > 0 and flossing_config.enabled and flossing_loss < flossing_config.stop_criteria:
+            if flossing_config.weight > 0 and flossing_config.enabled and flossing_loss < abs(flossing_config.stop_criteria):
                 loss = flossing_config.weight * flossing_loss + output_loss
+
+                enabled_flossing = True
             else:
                 loss = output_loss
+
+                enabled_flossing = False
+
+            if pre_enabled_flossing != enabled_flossing:
+                tb_x = epoch_index * len(training_loader) + i + 1
+
+                print(f"  batch {tb_x} Switching state for flossing from {pre_enabled_flossing} to {enabled_flossing}")
+
+            pre_enabled_flossing = enabled_flossing
         else:
             # Make predictions for this batch
             outputs = model(inputs)
