@@ -79,7 +79,7 @@ def initial_train_condition(training_loader, optimizer, model, tb_writer,
     global_step = 0
 
     for epoch_index in range(flossing_config.conditioning_steps):
-        print('epoch {}', epoch_index)
+        print(f'epoch {epoch_index}:')
 
         average_running_max = 0
 
@@ -133,9 +133,13 @@ def initial_train_condition(training_loader, optimizer, model, tb_writer,
 
                 tb_writer.add_scalar('Conditioned Loss/Flossing Max', running_max_le, tb_x)
 
+                current_average = average_running_max / batch_numbers
+                tb_writer.add_scalar('Conditioned Loss/Flossing Average', running_max_le, current_average)
+
                 print(
-                    '  batch {} step {} flossing (max: {}): {}'.format(batch_index + 1, global_step + 1, running_max_le,
-                                                                       last_loss))
+                    '  batch {} step {} flossing (max: {} average: {}): {}'.format(batch_index + 1, global_step + 1,
+                                                                                   running_max_le, current_average,
+                                                                                   last_loss))
 
                 running_max_le = None
                 running_loss = 0.
@@ -146,7 +150,7 @@ def initial_train_condition(training_loader, optimizer, model, tb_writer,
 
         epoch_average = average_running_max / batch_numbers
 
-        print('epoch {} average max {}', epoch_index, epoch_average)
+        print(f'epoch {epoch_index}: average max {epoch_average}')
 
         if abs(epoch_average) <= abs(flossing_config.stop_criteria):
             print(
