@@ -98,6 +98,58 @@ def load_runs(base_dir: Path):
     return runs
 
 
+def _compute_group_means(runs, key, group_fn):
+    """
+    Compute two mean curves (success, fail) for a given lyapunov key.
+    - runs: list of run dicts
+    - key: e.g. "running_lyapunov_exponents" or "conditional_lyaponov_exponents"
+    - group_fn: function(run) -> True if success, False otherwise
+
+    Returns:
+        T_success, mean_success, T_fail, mean_fail
+        where each T_* is np.arange(1, len(mean_*)+1)
+    """
+    # collect sequences
+    success_seqs = []
+    fail_seqs = []
+    max_len_success = 0
+    max_len_fail = 0
+
+    for r in runs:
+        arr = r.get(key, None)
+        if arr is None:
+            continue
+        arr = np.asarray(arr, dtype=float).ravel()
+        if arr.size == 0:
+            continue
+
+        if group_fn(r):
+            success_seqs.append(arr)
+            max_len_success = max(max_len_success, arr.size)
+        else:
+            fail_seqs.append(arr)
+            max_len_fail = max(max_len_fail, arr.size)
+
+    def _mean_over_ragged(seqs, max_len):
+        if max_len == 0 or len(seqs) == 0:
+            return np.array([])
+        means = []
+        for t in range(max_len):
+            vals_t = [seq[t] for seq in seqs if seq.size > t]
+            if len(vals_t) == 0:
+                break
+            means.append(np.mean(vals_t))
+        return np.asarray(means, dtype=float)
+
+    mean_success = _mean_over_ragged(success_seqs, max_len_success)
+    mean_fail = _mean_over_ragged(fail_seqs, max_len_fail)
+
+    T_success = np.arange(1, mean_success.size + 1) if mean_success.size else np.array([])
+    T_fail = np.arange(1, mean_fail.size + 1) if mean_fail.size else np.array([])
+
+    return T_success, mean_success, T_fail, mean_fail
+
+
 def is_success_run(run, threshold=0.2):
     final_loss = run.get("final_loss", float("nan"))
     if np.isnan(final_loss):
@@ -202,6 +254,7 @@ FAIL_COLOR = 'tab:red'
 def plot_lyapunov_runs(runs, out_path: Path, title="Running Lyapunov exponents"):
     fig, ax = plt.subplots()
 
+    # 1) plot all individual runs, faint
     max_T = 0
     for r in runs:
         lyap = r.get("running_lyapunov_exponents", None)
@@ -215,7 +268,14 @@ def plot_lyapunov_runs(runs, out_path: Path, title="Running Lyapunov exponents")
         max_T = max(max_T, lyap.size)
 
         color = SUCCESS_COLOR if is_success_run(r) else FAIL_COLOR
-        ax.plot(T, lyap, color=color, linewidth=1.0, alpha=.1)
+        ax.plot(T, lyap, color=color, linewidth=1.0, alpha=0.1)
+
+    # 2) compute and draw the two group means (over ragged sequences)
+    T_s, mean_s, T_f, mean_f = _compute_group_means(
+        runs,
+        key="running_lyapunov_exponents",
+        group_fn=is_success_run,
+    )
 
     ax.set_xlabel("Training steps")
     ax.set_ylabel("Lyapunov exponent")
@@ -224,12 +284,25 @@ def plot_lyapunov_runs(runs, out_path: Path, title="Running Lyapunov exponents")
     # good practice for dynamical quantities
     ax.axhline(0.0, color="black", linewidth=0.6, alpha=0.5)
 
-    # Legend: manual, 2 colors
+    # Legend: make sure both individual & mean are explained
+
     legend_elems = [
-        Line2D([0], [0], color=SUCCESS_COLOR, lw=1.2, label=r"Converged (loss $\approx 0$)"),
-        Line2D([0], [0], color=FAIL_COLOR, lw=1.2, label="No learning"),
+        Line2D([0], [0], color=SUCCESS_COLOR, lw=1., alpha=0.1, label=r"Converged (loss $\approx 0$)"),
+        Line2D([0], [0], color=FAIL_COLOR, lw=1., alpha=0.1, label="No learning"),
     ]
-    ax.legend(handles=legend_elems, loc='bottom right')
+    # add mean lines (only if they exist)
+    if mean_s.size:
+        line_mean_s, = ax.plot(T_s, mean_s, color=SUCCESS_COLOR, linewidth=2.0, alpha=1.0,
+                               label=r"Converged mean (loss $\approx 0$)")
+
+        legend_elems.append(line_mean_s)
+    if mean_f.size:
+        line_mean_f, = ax.plot(T_f, mean_f, color=FAIL_COLOR, linewidth=2.0, alpha=1.0,
+                               label="No learning mean")
+
+        legend_elems.append(line_mean_f)
+
+    ax.legend(handles=legend_elems, loc='lower left')
 
     ax.grid(True, linestyle=":", linewidth=0.4, alpha=0.5)
 
@@ -242,6 +315,7 @@ def plot_lyapunov_runs(runs, out_path: Path, title="Running Lyapunov exponents")
 def plot_conditional_lyapunov_runs(runs, out_path: Path, title="Conditional Lyapunov exponents"):
     fig, ax = plt.subplots()
 
+    # 1) plot all individual runs, faint
     for r in runs:
         lyap = r.get("conditional_lyaponov_exponents", None)
         if lyap is None:
@@ -253,7 +327,14 @@ def plot_conditional_lyapunov_runs(runs, out_path: Path, title="Conditional Lyap
         T = np.arange(1, lyap.size + 1)
 
         color = SUCCESS_COLOR if is_success_run(r) else FAIL_COLOR
-        ax.plot(T, lyap, color=color, linewidth=1.0, alpha=.1)
+        ax.plot(T, lyap, color=color, linewidth=1.0, alpha=0.1)
+
+    # 2) group means
+    T_s, mean_s, T_f, mean_f = _compute_group_means(
+        runs,
+        key="conditional_lyaponov_exponents",
+        group_fn=is_success_run,
+    )
 
     ax.set_xlabel("Pre-flossing Training Steps")
     ax.set_ylabel("Lyapunov exponent")
@@ -261,10 +342,22 @@ def plot_conditional_lyapunov_runs(runs, out_path: Path, title="Conditional Lyap
     ax.axhline(0.0, color="black", linewidth=0.6, alpha=0.5)
 
     legend_elems = [
-        Line2D([0], [0], color=SUCCESS_COLOR, lw=1.2, label=r"Converged (loss $\approx 0$)"),
-        Line2D([0], [0], color=FAIL_COLOR, lw=1.2, label="No learning"),
+        Line2D([0], [0], color=SUCCESS_COLOR, lw=1.0, alpha=0.1, label=r"Converged (loss $\approx 0$)"),
+        Line2D([0], [0], color=FAIL_COLOR, lw=1.0, alpha=0.1, label="No learning"),
     ]
-    ax.legend(handles=legend_elems, loc='bottom left')
+
+    if mean_s.size:
+        line_mean_s, = ax.plot(T_s, mean_s, color=SUCCESS_COLOR, linewidth=2.0, alpha=1.0,
+                               label=r"Converged mean (loss $\approx 0$)")
+
+        legend_elems.append(line_mean_s)
+    if mean_f.size:
+        line_mean_f, = ax.plot(T_f, mean_f, color=FAIL_COLOR, linewidth=2.0, alpha=1.0,
+                               label="No learning mean")
+
+        legend_elems.append(line_mean_f)
+
+    ax.legend(handles=legend_elems, loc='lower right')
 
     ax.grid(True, linestyle=":", linewidth=0.4, alpha=0.5)
 
