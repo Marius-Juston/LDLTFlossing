@@ -208,7 +208,7 @@ def train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_index, tb_
 
             output_loss = loss_fn(outputs, labels)
 
-            if flossing_config.weight > 0 and flossing_config.enabled and flossing_loss < abs(
+            if flossing_config.weight > 0 and flossing_config.enabled and flossing_loss > abs(
                     flossing_config.stop_criteria):
                 loss = flossing_config.weight * flossing_loss + output_loss
 
