@@ -70,23 +70,38 @@ def load_runs(base_dir: Path):
             print(f"Warning: could not load {results_path}: {e}")
             continue
 
+        running_lyapunov_exponents = np.asarray(entry["running_lyapunov_exponents"], dtype=float)
+        conditional_lyaponov_exponents = np.asarray(entry["conditional_lyaponov_exponents"], dtype=float)
+
         L = int(entry.get("L"))
         hidden = int(entry.get("hidden_size", -1))
         model_size = int(entry.get("model_size", -1))
         num_interior = int(entry.get("num_interior", -1))
+
+        final_loss = float(losses[-1]) if losses.size > 0 else float("nan")
+
         runs.append({
             "L": L,
             "hidden": hidden,
             "losses": losses,
+            "final_loss": final_loss,
             "model_size": model_size,
             "num_interior": num_interior,
-            "run_dir": str(run_dir)
+            "run_dir": str(run_dir),
+            'conditional_lyaponov_exponents': conditional_lyaponov_exponents,
+            'running_lyapunov_exponents': running_lyapunov_exponents
         })
 
     if len(runs) == 0:
         raise RuntimeError("No successful runs found in index.json")
     return runs
 
+
+def is_success_run(run, threshold=0.2):
+    final_loss = run.get("final_loss", float("nan"))
+    if np.isnan(final_loss):
+        return False
+    return final_loss < threshold
 
 def plot_all_runs(runs,
                   out_base: Path,
@@ -177,6 +192,84 @@ def plot_all_runs(runs,
     plt.close(fig)
     print(f"Saved: {out_png}")
 
+SUCCESS_COLOR = 'tab:green'
+FAIL_COLOR = 'tab:red'
+
+def plot_lyapunov_runs(runs, out_path: Path, title="Running Lyapunov exponents"):
+    fig, ax = plt.subplots()
+
+    max_T = 0
+    for r in runs:
+        lyap = r.get("running_lyapunov_exponents", None)
+        if lyap is None:
+            continue
+        lyap = np.asarray(lyap, dtype=float).ravel()
+        if lyap.size == 0:
+            continue
+
+        T = np.arange(1, lyap.size + 1)
+        max_T = max(max_T, lyap.size)
+
+        color = SUCCESS_COLOR if is_success_run(r) else FAIL_COLOR
+        ax.plot(T, lyap, color=color, linewidth=1.0, alpha=.1)
+
+    ax.set_xlabel("Training steps")
+    ax.set_ylabel("Lyapunov exponent")
+    ax.set_title(title)
+
+    # good practice for dynamical quantities
+    ax.axhline(0.0, color="black", linewidth=0.6, alpha=0.5)
+
+    # Legend: manual, 2 colors
+    from matplotlib.lines import Line2D
+    legend_elems = [
+        Line2D([0], [0], color=SUCCESS_COLOR, lw=1.2, label=r"Converged (loss $\approx 0$)"),
+        Line2D([0], [0], color=FAIL_COLOR, lw=1.2, label="No learning"),
+    ]
+    ax.legend(handles=legend_elems, loc='bottom right')
+
+    ax.grid(True, linestyle=":", linewidth=0.4, alpha=0.5)
+
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight", dpi=DPI)
+    plt.close(fig)
+    print(f"Saved: {out_path}")
+
+
+def plot_conditional_lyapunov_runs(runs, out_path: Path, title="Conditional Lyapunov exponents"):
+    fig, ax = plt.subplots()
+
+    for r in runs:
+        lyap = r.get("conditional_lyaponov_exponents", None)
+        if lyap is None:
+            continue
+        lyap = np.asarray(lyap, dtype=float).ravel()
+        if lyap.size == 0:
+            continue
+
+        T = np.arange(1, lyap.size + 1)
+
+        color = SUCCESS_COLOR if is_success_run(r) else FAIL_COLOR
+        ax.plot(T, lyap, color=color, linewidth=1.0, alpha=.1)
+
+    ax.set_xlabel("Pre-flossing Training Steps")
+    ax.set_ylabel("Lyapunov exponent")
+    ax.set_title(title)
+    ax.axhline(0.0, color="black", linewidth=0.6, alpha=0.5)
+
+    from matplotlib.lines import Line2D
+    legend_elems = [
+        Line2D([0], [0], color=SUCCESS_COLOR, lw=1.2, label=r"Converged (loss $\approx 0$)"),
+        Line2D([0], [0], color=FAIL_COLOR, lw=1.2, label="No learning"),
+    ]
+    ax.legend(handles=legend_elems, loc='bottom left')
+
+    ax.grid(True, linestyle=":", linewidth=0.4, alpha=0.5)
+
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight", dpi=DPI)
+    plt.close(fig)
+    print(f"Saved: {out_path}")
 
 def parameter_plots(stacked=False, flossing=False):
     # === User-configurable ===
@@ -207,6 +300,23 @@ def parameter_plots(stacked=False, flossing=False):
     param_size_name = BASE_DIR / "losses_by_parameter_size"
     plot_all_runs(runs, param_size_name, figsize=FIGSIZE, dpi=DPI, ylog=YSCALE_LOG,
                   cmap_name=COLORMAP, linewidth=LINEWIDTH, alpha=ALPHA, network_size=True)
+
+
+    lyapunov_running_path = BASE_DIR / "lyapunov_running.png"
+    lyapunov_conditional_path = BASE_DIR / "lyapunov_conditional.png"
+
+
+    plot_lyapunov_runs(
+        runs,
+        out_path=lyapunov_running_path,
+        title="Lyapunov exponents of networks during training",
+    )
+
+    plot_conditional_lyapunov_runs(
+        runs,
+        out_path=lyapunov_conditional_path,
+        title="Lyapunov exponents of networks during pre-flossing"
+    )
 
 
 def plot_grid_results(stacked=False, flossing=False, dpi=600):
@@ -251,6 +361,6 @@ if __name__ == "__main__":
     stacked = False
     flossing = True
 
-    plot_grid_results(stacked=stacked, flossing=flossing, dpi=DPI)
+    # plot_grid_results(stacked=stacked, flossing=flossing, dpi=DPI)
 
     parameter_plots(stacked, flossing)
