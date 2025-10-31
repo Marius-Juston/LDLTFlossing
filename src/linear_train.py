@@ -33,6 +33,11 @@ torch.backends.cudnn.allow_tf32 = True
 
 @torch.no_grad()
 def alpha_values(model: DeepLipschitzLinearResNet) -> Dict[str, float]:
+    """
+    Print out the alpha values for the layers
+    :param model: the Lipschitz model
+    :return: the alpha values for each layer
+    """
     output = dict()
 
     output['A'] = model.A.alpha.item()
@@ -51,20 +56,31 @@ def alpha_values(model: DeepLipschitzLinearResNet) -> Dict[str, float]:
 
 @dataclasses.dataclass()
 class FlossingConfig:
-    enabled: bool = False
-    enable_logging: bool = True
-    flossing_frequency: Optional[int] = None
-    flossing_le: int = 1
-    num_sample_trajectories: int = 300
-    weight: float = 0.05
-    offset: float = 0.0
-    stop_criteria: float = -0.2
-    conditioning_steps = 5
+    enabled: bool = False  # Enable the gradient flossing training
+    enable_logging: bool = True  # Compute the Lyapunov exponents but do not train
+    flossing_frequency: Optional[
+        int] = None  # if none apply the flossing normalization only at the end. Otherwise, apply the orthonormalizing at n layers
+    flossing_le: int = 1  # The maximum number of Lyapunov exponents to floss for
+    num_sample_trajectories: int = 300  # Number of sample trajectories to generate the batched exponents for
+    weight: float = 1  # The loss scale weighting
+    offset: float = 0.0  # The training offset to have the Lyapunov trained to be (le + offset)^2
+    stop_criteria: float = -0.2  # The criterion to stop training
+    conditioning_steps = 5  # The total number of epochs to train for the pre-flossing for
 
 
 def initial_train_condition(training_loader, optimizer, model, tb_writer,
                             flossing_config: FlossingConfig,
                             logging_frequency=100):
+    """
+    Train network by training the Lyapnov exponents to the target offset value
+    :param training_loader: The training dataset inputs
+    :param optimizer: the optimizer to use
+    :param model: the lipchitz model to use
+    :param tb_writer: the SummaryWrite for tensorboard logging
+    :param flossing_config: the gradient flossing condig
+    :param logging_frequency: how often to log to tensorboard and other
+    :return: the Lyaponov exponents during the training
+    """
     print(
         "Initially generating a conditioning of the model to move the Lyapunov exponents to a regime before the actual training")
 
@@ -164,6 +180,17 @@ def initial_train_condition(training_loader, optimizer, model, tb_writer,
 
 def train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_index, tb_writer, flossing_config: FlossingConfig,
                     logging_frequency=100):
+    """
+    Train network by training the Lyapunov exponents to the target offset value adaptively such that it automatically turns off if the loss is already within a gradient flossing
+    :param training_loader: The training dataset inputs
+    :param optimizer: the optimizer to use
+    :param model: the Lipschitz model to use
+    :param tb_writer: the SummaryWrite for tensorboard logging
+    :param flossing_config: the gradient flossing conf
+    :param logging_frequency: how often to log to tensorboard and other
+    :return: the Lyaponov exponents during the training
+    """
+
     running_loss = 0.
     last_loss = 0.
 
