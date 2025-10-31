@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from matplotlib.lines import Line2D
 
 DPI = 600
 
@@ -103,6 +104,7 @@ def is_success_run(run, threshold=0.2):
         return False
     return final_loss < threshold
 
+
 def plot_all_runs(runs,
                   out_base: Path,
                   figsize=(9, 6),
@@ -192,8 +194,10 @@ def plot_all_runs(runs,
     plt.close(fig)
     print(f"Saved: {out_png}")
 
+
 SUCCESS_COLOR = 'tab:green'
 FAIL_COLOR = 'tab:red'
+
 
 def plot_lyapunov_runs(runs, out_path: Path, title="Running Lyapunov exponents"):
     fig, ax = plt.subplots()
@@ -221,7 +225,6 @@ def plot_lyapunov_runs(runs, out_path: Path, title="Running Lyapunov exponents")
     ax.axhline(0.0, color="black", linewidth=0.6, alpha=0.5)
 
     # Legend: manual, 2 colors
-    from matplotlib.lines import Line2D
     legend_elems = [
         Line2D([0], [0], color=SUCCESS_COLOR, lw=1.2, label=r"Converged (loss $\approx 0$)"),
         Line2D([0], [0], color=FAIL_COLOR, lw=1.2, label="No learning"),
@@ -257,7 +260,6 @@ def plot_conditional_lyapunov_runs(runs, out_path: Path, title="Conditional Lyap
     ax.set_title(title)
     ax.axhline(0.0, color="black", linewidth=0.6, alpha=0.5)
 
-    from matplotlib.lines import Line2D
     legend_elems = [
         Line2D([0], [0], color=SUCCESS_COLOR, lw=1.2, label=r"Converged (loss $\approx 0$)"),
         Line2D([0], [0], color=FAIL_COLOR, lw=1.2, label="No learning"),
@@ -270,6 +272,7 @@ def plot_conditional_lyapunov_runs(runs, out_path: Path, title="Conditional Lyap
     fig.savefig(out_path, bbox_inches="tight", dpi=DPI)
     plt.close(fig)
     print(f"Saved: {out_path}")
+
 
 def parameter_plots(stacked=False, flossing=False):
     # === User-configurable ===
@@ -301,10 +304,8 @@ def parameter_plots(stacked=False, flossing=False):
     plot_all_runs(runs, param_size_name, figsize=FIGSIZE, dpi=DPI, ylog=YSCALE_LOG,
                   cmap_name=COLORMAP, linewidth=LINEWIDTH, alpha=ALPHA, network_size=True)
 
-
     lyapunov_running_path = BASE_DIR / "lyapunov_running.png"
     lyapunov_conditional_path = BASE_DIR / "lyapunov_conditional.png"
-
 
     plot_lyapunov_runs(
         runs,

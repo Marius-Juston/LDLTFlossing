@@ -208,7 +208,8 @@ def train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_index, tb_
 
             output_loss = loss_fn(outputs, labels)
 
-            if flossing_config.weight > 0 and flossing_config.enabled and flossing_loss < abs(flossing_config.stop_criteria):
+            if flossing_config.weight > 0 and flossing_config.enabled and flossing_loss < abs(
+                    flossing_config.stop_criteria):
                 loss = flossing_config.weight * flossing_loss + output_loss
 
                 enabled_flossing = True
@@ -295,10 +296,12 @@ def log_all(summary_writer, parameters: Iterator[Tuple[str, Parameter]], step, p
         if param.requires_grad and param.grad is not None:
             fnc(f"{prefix} gradients/{n}", param.grad, global_step=step)
 
-            summary_writer.add_scalar(f"{prefix} gradients norm/{n}", torch.linalg.matrix_norm(torch.atleast_2d(param.grad)), global_step=step)
+            summary_writer.add_scalar(f"{prefix} gradients norm/{n}",
+                                      torch.linalg.matrix_norm(torch.atleast_2d(param.grad)), global_step=step)
 
         fnc(f"{prefix} values/{n}", param, global_step=step)
-        summary_writer.add_scalar(f"{prefix} values norm/{n}", torch.linalg.matrix_norm(torch.atleast_2d(param)), global_step=step)
+        summary_writer.add_scalar(f"{prefix} values norm/{n}", torch.linalg.matrix_norm(torch.atleast_2d(param)),
+                                  global_step=step)
 
 
 def train(x, y, model: DeepLipschitzLinearResNet, flossing_config: Optional[FlossingConfig] = None,
