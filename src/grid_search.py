@@ -142,7 +142,7 @@ def grid_search(L_start=3, L_end=15, L_step=2, hidden=(8, 16, 32, 64, 128),
                 epochs=20, batch_size=64, lr=1e-4, base_save_dir='../runs/grid_search',
                 num_gpus=4, num_interior=5, stack=False, flossing=False):
     """
-    Orchestrates a grid search over L in [L_start..L_end] step L_step and hidden sizes.
+    Orchestrates a grid search over L in [L_start...L_end] step L_step and hidden sizes.
     Uses up to `num_gpus` processes in parallel (round-robin GPU assignment).
     Results are saved per-run to `base_save_dir`.
     """
@@ -225,9 +225,14 @@ def grid_search(L_start=3, L_end=15, L_step=2, hidden=(8, 16, 32, 64, 128),
 
 
 if __name__ == '__main__':
+    num_gpus = torch.cuda.device_count()
+
+    assert num_gpus > 0, "You need at the minimum 1 GPU to run this"
+
     # grid_search(L_start=3, L_end=13, L_step=2, hidden=(8, 16, 32, 64, 128), epochs=20,
-    #             batch_size=64, lr=1e-4, base_save_dir='../runs/grid_search', num_gpus=4, stack=False, num_interior=4)
+    #             batch_size=64, lr=1e-4, base_save_dir='../runs/grid_search', num_gpus=num_gpus, stack=False, num_interior=4)
 
     grid_search(L_start=3, L_end=13, L_step=2, hidden=(8, 16, 32, 64, 128), epochs=20,
-                batch_size=64, lr=1e-4, base_save_dir='../runs/grid_search', num_gpus=4, stack=False, num_interior=4,
+                batch_size=64, lr=1e-4, base_save_dir='../runs/grid_search', num_gpus=num_gpus, stack=False,
+                num_interior=4,
                 flossing=True)
