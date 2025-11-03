@@ -455,6 +455,6 @@ if __name__ == "__main__":
     stacked = False
     flossing = True
 
-    # plot_grid_results(stacked=stacked, flossing=flossing, dpi=DPI)
+    plot_grid_results(stacked=stacked, flossing=flossing, dpi=DPI)
 
     parameter_plots(stacked, flossing)
