@@ -1,3 +1,5 @@
+"""Standalone script demonstrating gradient flossing on a linear MLP."""
+
 import random
 
 import matplotlib.colors as mcolors
@@ -11,6 +13,7 @@ DPI = 600
 
 
 def set_seed(seed):
+    """Seed Python, NumPy, and PyTorch RNGs for reproducibility."""
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     np.random.seed(seed)
@@ -18,12 +21,14 @@ def set_seed(seed):
 
 
 class Linear(nn.Linear):
+    """Linear layer with a cached activation used inside the demo network."""
     def __init__(self, in_features: int, out_features: int, bias: bool = True, device=None, dtype=None):
         super().__init__(in_features, out_features, bias, device, dtype)
 
         self.activation = nn.ReLU()
 
     def forward(self, x):
+        """Apply ``Wx + b`` followed by ReLU and cache the activations."""
         self.x = x
 
         linear_out = super().forward(x)
@@ -34,6 +39,7 @@ class Linear(nn.Linear):
 
 
 class Network(nn.Module):
+    """Simple feed-forward network instrumented for Lyapunov analysis."""
     def __init__(self, Nin, n_hidden, hidden_dim, Nout, device=None, dtype=None):
         super().__init__()
         self.dtype = dtype
@@ -62,6 +68,7 @@ class Network(nn.Module):
         self.model = nn.Sequential(*modules)
 
     def forward(self, x):
+        """Forward all layers sequentially."""
         return self.model(x)
 
     def __len__(self):
@@ -70,6 +77,7 @@ class Network(nn.Module):
 
 def calculate_lyapunov_spectrum(linear_network, x_data, nle, n_random_samples: int = None,
                                 normalization_frequency: int = 1):
+    """Estimate Lyapunov exponents for ``linear_network`` via QR iterations."""
     x = x_data.clone()
 
     if n_random_samples:

@@ -1,9 +1,12 @@
+"""Infrastructure for launching gradient-flossing grid searches on multiple GPUs."""
+
 import json
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict, Mapping, Tuple
 
 import numpy as np
 import torch
@@ -12,12 +15,22 @@ from linear_train import train, FlossingConfig
 from models.linear_model import DeepLipschitzSequential, DeepLipschitzSequentialStack
 
 
-def worker_run(task):
-    """
-    Worker function to run one training instance in a separate process.
-    `task` is a dict with keys: L, hidden_size, epochs, batch_size, lr, device_id, base_save_dir.
-    This function builds the model on the specified GPU and calls the existing `train`.
-    It returns a dict with metadata and file paths.
+def worker_run(task: Mapping[str, Any]) -> Dict[str, Any]:
+    """Execute a single training configuration inside a worker process.
+
+    Args:
+        task: Serializable configuration dictionary produced by
+            :func:`grid_search`. Mandatory keys are ``L``, ``hidden_size``,
+            ``epochs``, ``batch_size``, ``lr``, ``device_id``,
+            ``num_interior``, ``stack``, ``base_save_dir`` and
+            ``flossing_config``.
+
+    The generated dataset mirrors the sine benchmark with ``x`` shaped
+    ``(100000, 1)`` and ``y`` of the same shape.
+
+    Returns:
+        dict: Summary metadata describing the finished run. Failed runs report
+        ``status='failed'`` and include the captured exception.
     """
 
     L = int(task['L'])
@@ -138,13 +151,36 @@ def worker_run(task):
     return summary
 
 
-def grid_search(L_start=3, L_end=15, L_step=2, hidden=(8, 16, 32, 64, 128),
-                epochs=20, batch_size=64, lr=1e-4, base_save_dir='../runs/grid_search',
-                num_gpus=4, num_interior=5, stack=False, flossing=False):
-    """
-    Orchestrates a grid search over L in [L_start...L_end] step L_step and hidden sizes.
-    Uses up to `num_gpus` processes in parallel (round-robin GPU assignment).
-    Results are saved per-run to `base_save_dir`.
+def grid_search(L_start: int = 3,
+                L_end: int = 15,
+                L_step: int = 2,
+                hidden: Tuple[int, ...] = (8, 16, 32, 64, 128),
+                epochs: int = 20,
+                batch_size: int = 64,
+                lr: float = 1e-4,
+                base_save_dir: str = '../runs/grid_search',
+                num_gpus: int = 4,
+                num_interior: int = 5,
+                stack: bool = False,
+                flossing: bool = False) -> Path:
+    """Launch a parallel hyper-parameter sweep across depth and width combos.
+
+    Args:
+        L_start: Smallest outer depth to evaluate.
+        L_end: Largest outer depth to evaluate (inclusive).
+        L_step: Step size for the depth sweep.
+        hidden: Tuple of hidden widths.
+        epochs: Number of epochs per configuration.
+        batch_size: Training batch size.
+        lr: Learning rate used by every job.
+        base_save_dir: Directory used to persist metadata/results.
+        num_gpus: Maximum number of concurrent worker processes.
+        num_interior: Number of interior layers per outer layer when stacking.
+        stack: Whether to use :class:`DeepLipschitzSequentialStack`.
+        flossing: Whether to enable gradient flossing.
+
+    Returns:
+        Path: Location of the generated ``index.json`` summary file.
     """
     if stack:
         base_save_dir += '_stack'

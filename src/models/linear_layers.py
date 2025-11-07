@@ -1,5 +1,7 @@
+"""Building blocks for Lipschitz-controlled linear networks."""
+
 import math
-from typing import Tuple
+from typing import Tuple, Optional
 
 import torch
 from torch import nn, Tensor
@@ -11,6 +13,7 @@ from utils import PositiveExp
 
 
 class AbstractLipschitzLinearLayer(nn.Linear):
+    """Linear block whose weights are parametrized to satisfy Lipschitz bounds."""
     identity: torch.Tensor
     identity_out: torch.Tensor
     constant_sq: torch.Tensor
@@ -55,6 +58,7 @@ class AbstractLipschitzLinearLayer(nn.Linear):
             self.register_buffer('alpha', initial_alpha)
 
     def reset_parameters(self) -> None:
+        """Reinitialize weights with Kaiming uniform while respecting dtype."""
         # Setting a=sqrt(5) in kaiming_uniform is the same as initializing with
         # uniform(-1/sqrt(in_features), 1/sqrt(in_features)). For details, see
         # https://github.com/pytorch/pytorch/issues/57109
@@ -64,7 +68,14 @@ class AbstractLipschitzLinearLayer(nn.Linear):
             bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
             init.uniform_(self.bias, -bound, bound)
 
-    def scale_w(self):
+    def scale_w(self) -> Tuple[Tensor, Tensor, Tensor]:
+        """Return normalized weights and SPD factors for ``self.weight``.
+
+        Returns:
+            Tuple[Tensor, Tensor, Tensor]: ``(omega, W_norm, R)`` where
+            ``omega`` has shape ``(out_features, out_features)`` and ``R`` is an
+            upper-triangular Cholesky factor satisfying ``R^T R = omega``.
+        """
         omega = self.sum_weight(transpose=True)
         R = torch.linalg.cholesky(omega, upper=True)
 
@@ -72,7 +83,8 @@ class AbstractLipschitzLinearLayer(nn.Linear):
 
         return omega, W, R
 
-    def sum_weight(self, transpose: bool = False):
+    def sum_weight(self, transpose: bool = False) -> Tensor:
+        """Return ``WᵀW + I`` or ``W Wᵀ + I`` depending on ``transpose``."""
         if transpose:
             return self.weight.T @ self.weight + self.identity * self.alpha
         else:
@@ -80,7 +92,10 @@ class AbstractLipschitzLinearLayer(nn.Linear):
 
 
 class FirstLipschitzLinearLayer(AbstractLipschitzLinearLayer):
+    """Entry layer that projects inputs while tracking normalization terms."""
+
     def forward(self, input: Tensor) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """Propagate ``input`` shaped ``(batch, in_features)`` and emit stats."""
         omega, W, R = self.scale_w()
 
         W = W * self.constant
@@ -92,8 +107,11 @@ class FirstLipschitzLinearLayer(AbstractLipschitzLinearLayer):
 
 
 class InnerWeightLipschitzLinearLayer(AbstractLipschitzLinearLayer):
+    """Hidden layer that consumes previous normalization buffers."""
+
     def forward(self, input: Tensor, prev_alpha: Tensor, prev_omega_r: Tensor, prev_constant: Tensor) -> \
             Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """Apply the constrained map to ``input`` shaped ``(batch, d)``."""
         _, W, _ = self.scale_w()
 
         W = torch.linalg.solve_triangular(prev_omega_r, W, upper=False, left=False)
@@ -113,8 +131,11 @@ class InnerWeightLipschitzLinearLayer(AbstractLipschitzLinearLayer):
 
 
 class LastLipschitzLinearLayer(AbstractLipschitzLinearLayer):
+    """Final layer that matches the Lipschitz budget with ``sigma_r``."""
+
     def forward(self, input: Tensor, sigma_r: Tensor, prev_alpha: Tensor, prev_omega_r: Tensor) -> Tuple[
         Tensor, Tensor]:
+        """Combine cached triangular factors with ``input`` shaped ``(batch, d)``."""
         _, W, _ = self.scale_w()
 
         prev_alpha = prev_alpha
@@ -127,24 +148,26 @@ class LastLipschitzLinearLayer(AbstractLipschitzLinearLayer):
 
 
 class LinearLipschitz(AbstractLipschitzLinearLayer):
+    """Plain linear block optionally followed by an activation."""
     sqrt_2: Tensor
 
-    def __init__(self, in_features: int, out_features: int, activation=None, bias: bool = True,
-                 constant_sq: float = 1.0,
-                 enable_alpha=True,
+    def __init__(self, in_features: int, out_features: int, activation: Optional[nn.Module] = None,
+                 bias: bool = True, constant_sq: float = 1.0,
+                 enable_alpha: bool = True,
                  device=None, dtype=None):
         super().__init__(in_features, out_features, bias, constant_sq, enable_alpha, device, dtype)
         self.register_buffer('sqrt_2', torch.tensor(2, device=device, dtype=dtype).sqrt())
 
         self.activation = activation
 
-    def forward(self, input: Tensor, prev_omega_r: Tensor, prev_alpha: Tensor, pre_constant: Tensor) -> Tuple[
+    def forward(self, input: Tensor, prev_omega_r: Tensor, prev_alpha: Tensor, prev_constant: Tensor) -> Tuple[
         Tensor, Tensor, Tensor]:
+        """Propagate ``input`` shaped ``(batch, in_features)`` through the block."""
         _, W, _ = self.scale_w()
 
         W = torch.linalg.solve_triangular(prev_omega_r, W, upper=False, left=False)
 
-        scale = prev_alpha.sqrt() * pre_constant * self.constant
+        scale = prev_alpha.sqrt() * prev_constant * self.constant
 
         W = scale * W
 

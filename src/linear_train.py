@@ -1,12 +1,15 @@
+"""Training utilities and gradient-flossing loops for linear Lipschitz models."""
+
 import dataclasses
 import os
 import traceback
 from datetime import datetime
-from typing import Dict, Optional, Iterator, Tuple
+from typing import Dict, Optional, Iterator, Tuple, List
 
 import torch
 from matplotlib import pyplot as plt
 from prettytable import PrettyTable
+from torch import Tensor
 from torch.nn import MSELoss, Parameter
 from torch.utils.data import TensorDataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
@@ -33,10 +36,13 @@ torch.backends.cudnn.allow_tf32 = True
 
 @torch.no_grad()
 def alpha_values(model: DeepLipschitzLinearResNet) -> Dict[str, float]:
-    """
-    Print out the alpha values for the layers
-    :param model: the Lipschitz model
-    :return: the alpha values for each layer
+    """Collect the per-layer Lipschitz scaling parameters.
+
+    Args:
+        model: The Lipschitz ResNet whose buffers/parameters should be logged.
+
+    Returns:
+        dict: Mapping of module names (``A``, ``B``, ``C_i``) to scalar values.
     """
     output = dict()
 
@@ -56,6 +62,7 @@ def alpha_values(model: DeepLipschitzLinearResNet) -> Dict[str, float]:
 
 @dataclasses.dataclass()
 class FlossingConfig:
+    """Configuration knobs for gradient flossing and diagnostics."""
     enabled: bool = False  # Enable the gradient flossing training
     enable_logging: bool = True  # Compute the Lyapunov exponents but do not train
     flossing_frequency: Optional[
@@ -68,18 +75,26 @@ class FlossingConfig:
     conditioning_steps = 5  # The total number of epochs to train for the pre-flossing for
 
 
-def initial_train_condition(training_loader, optimizer, model, tb_writer,
+def initial_train_condition(training_loader: DataLoader,
+                            optimizer: torch.optim.Optimizer,
+                            model: torch.nn.Module,
+                            tb_writer: SummaryWriter,
                             flossing_config: FlossingConfig,
-                            logging_frequency=100):
-    """
-    Train network by training the Lyapnov exponents to the target offset value
-    :param training_loader: The training dataset inputs
-    :param optimizer: the optimizer to use
-    :param model: the lipchitz model to use
-    :param tb_writer: the SummaryWrite for tensorboard logging
-    :param flossing_config: the gradient flossing condig
-    :param logging_frequency: how often to log to tensorboard and other
-    :return: the Lyaponov exponents during the training
+                            logging_frequency: int = 100) -> List[Tensor]:
+    """Pre-condition the network by aligning Lyapunov exponents.
+
+    Args:
+        training_loader: Data loader yielding ``(x, y)`` where ``x`` has
+            shape ``(batch, in_features)`` and ``y`` matches model outputs.
+        optimizer: Optimizer instance shared with the main training loop.
+        model: Lipschitz network being conditioned.
+        tb_writer: TensorBoard writer for logging intermediate statistics.
+        flossing_config: Configuration describing the flossing objective.
+        logging_frequency: Number of batches between TensorBoard flushes.
+
+    Returns:
+        list[Tensor]: Recorded Lyapunov spectra shaped ``(batch, nle)`` per
+        conditioning step.
     """
     print(
         "Initially generating a conditioning of the model to move the Lyapunov exponents to a regime before the actual training")
@@ -178,17 +193,30 @@ def initial_train_condition(training_loader, optimizer, model, tb_writer,
     return lyponov_exponents
 
 
-def train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_index, tb_writer, flossing_config: FlossingConfig,
-                    logging_frequency=100):
-    """
-    Train network by training the Lyapunov exponents to the target offset value adaptively such that it automatically turns off if the loss is already within a gradient flossing
-    :param training_loader: The training dataset inputs
-    :param optimizer: the optimizer to use
-    :param model: the Lipschitz model to use
-    :param tb_writer: the SummaryWrite for tensorboard logging
-    :param flossing_config: the gradient flossing conf
-    :param logging_frequency: how often to log to tensorboard and other
-    :return: the Lyaponov exponents during the training
+def train_one_epoch(training_loader: DataLoader,
+                    optimizer: torch.optim.Optimizer,
+                    model: torch.nn.Module,
+                    loss_fn: torch.nn.Module,
+                    epoch_index: int,
+                    tb_writer: SummaryWriter,
+                    flossing_config: FlossingConfig,
+                    logging_frequency: int = 100) -> Tuple[float, List[Tensor]]:
+    """Train for one epoch while optionally applying gradient flossing.
+
+    Args:
+        training_loader: Data loader that yields ``(x, y)`` pairs with
+            ``x`` shaped ``(batch, in_features)``.
+        optimizer: Optimizer that will be stepped once per batch.
+        model: Lipschitz model under training.
+        loss_fn: Reconstruction loss applied to ``(y_hat, y)``.
+        epoch_index: Zero-based epoch counter (used for logging step ids).
+        tb_writer: TensorBoard writer for gradient/value histograms.
+        flossing_config: Configuration describing flossing frequency/weight.
+        logging_frequency: Number of batches between TensorBoard log entries.
+
+    Returns:
+        Tuple[float, list[Tensor]]: Average loss and the sampled Lyapunov
+        spectra (each shaped ``(batch, nle)``) collected during the epoch.
     """
 
     running_loss = 0.
@@ -314,6 +342,7 @@ def train_one_epoch(training_loader, optimizer, model, loss_fn, epoch_index, tb_
 
 @torch.no_grad()
 def log_all(summary_writer, parameters: Iterator[Tuple[str, Parameter]], step, prefix=''):
+    """Log parameter values and gradients to TensorBoard."""
     for n, param in parameters:
         if param.numel() == 1:
             fnc = summary_writer.add_scalar
@@ -331,10 +360,40 @@ def log_all(summary_writer, parameters: Iterator[Tuple[str, Parameter]], step, p
                                   global_step=step)
 
 
-def train(x, y, model: DeepLipschitzLinearResNet, flossing_config: Optional[FlossingConfig] = None,
-          learning_prefix='sine', batch_size=64, lr=1e-3,
-          termination_error=5e-3, epochs=100, theoretical_lower=0, logging_frequency=100,
-          logging_folder=None):
+def train(x: Tensor,
+          y: Tensor,
+          model: torch.nn.Module,
+          flossing_config: Optional[FlossingConfig] = None,
+          learning_prefix: str = 'sine',
+          batch_size: int = 64,
+          lr: float = 1e-3,
+          termination_error: float = 5e-3,
+          epochs: int = 100,
+          theoretical_lower: float = 0.0,
+          logging_frequency: int = 100,
+          logging_folder: Optional[str] = None
+          ) -> Tuple[Optional[Exception], str, Optional[float], Optional[int], List[float], List[List[float]],
+                     List[List[float]]]:
+    """Train a Lipschitz network on a regression task with optional flossing.
+
+    Args:
+        x: Input tensor with shape ``(num_samples, in_features)``.
+        y: Target tensor with shape ``(num_samples, out_features)``.
+        model: Lipschitz network to optimize (sequential, stacked, or ResNet).
+        flossing_config: Optional :class:`FlossingConfig` instance.
+        learning_prefix: Prefix used for run directories.
+        batch_size: Mini-batch size.
+        lr: Adam learning rate.
+        termination_error: Early-stopping target for the training loss.
+        epochs: Maximum number of epochs.
+        theoretical_lower: Lower bound used for sanity checks.
+        logging_frequency: Number of batches between TensorBoard logs.
+        logging_folder: Optional override for the log/checkpoint directory.
+
+    Returns:
+        Tuple containing the execution status, checkpoint folder, best loss,
+        epoch for best loss, per-epoch losses, and Lyapunov traces.
+    """
     if flossing_config is None:
         flossing_config = FlossingConfig(enabled=False)
 
@@ -472,7 +531,12 @@ def train(x, y, model: DeepLipschitzLinearResNet, flossing_config: Optional[Flos
     return error, save_folder, best_loss, best_epoch, losses, running_lyapunov_exponents, conditioned_lyapunov_exponents
 
 
-def print_num_parameters(model):
+def print_num_parameters(model: torch.nn.Module) -> int:
+    """Pretty-print the number of trainable parameters per module.
+
+    Returns:
+        int: Total number of trainable parameters.
+    """
     table = PrettyTable(["Modules", "Parameters"])
     total_params = 0
     for name, parameter in model.named_parameters():
@@ -486,7 +550,8 @@ def print_num_parameters(model):
     return total_params
 
 
-def sine_training(L=10, hidden=64, epochs=20, device_id: int = 0):
+def sine_training(L: int = 10, hidden: int = 64, epochs: int = 20, device_id: int = 0) -> List[float]:
+    """Convenience wrapper that trains a plain sequential model on ``sin(x)``."""
     torch.manual_seed(0)
     device = torch.device(f'cuda:{device_id}' if torch.cuda.is_available() else 'cpu')
 
@@ -531,7 +596,8 @@ def sine_training(L=10, hidden=64, epochs=20, device_id: int = 0):
     return losses
 
 
-def sine_training_flossing(L=10, hidden=64, epochs=20, device_id: int = 0):
+def sine_training_flossing(L: int = 10, hidden: int = 64, epochs: int = 20, device_id: int = 0) -> List[float]:
+    """Train ``sin(x)`` while turning on gradient flossing."""
     torch.manual_seed(0)
     device = torch.device(f'cuda:{device_id}' if torch.cuda.is_available() else 'cpu')
 
@@ -578,7 +644,9 @@ def sine_training_flossing(L=10, hidden=64, epochs=20, device_id: int = 0):
     return losses
 
 
-def sine_training_grouped(L=2, hidden=64, L_int=4, epochs=20, device_id: int = 0):
+def sine_training_grouped(L: int = 2, hidden: int = 64, L_int: int = 4, epochs: int = 20,
+                          device_id: int = 0) -> List[float]:
+    """Train the stacked architecture on ``sin(x)``."""
     torch.manual_seed(0)
     device = torch.device(f'cuda:{device_id}' if torch.cuda.is_available() else 'cpu')
 

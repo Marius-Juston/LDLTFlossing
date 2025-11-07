@@ -1,3 +1,5 @@
+"""Model definitions for Lipschitz-constrained linear architectures."""
+
 from typing import Union, List, Sequence, Tuple, Optional
 
 import torch
@@ -10,6 +12,7 @@ from utils import safe_cholesky
 
 
 class DeepLipschitzLinearResNet(nn.Module):
+    """Residual linear network that enforces a global Lipschitz constant."""
     A: FirstLipschitzLinearLayer
     B: LastLipschitzLinearLayer
     layers: ModuleList
@@ -55,6 +58,7 @@ class DeepLipschitzLinearResNet(nn.Module):
             layer.reset_parameters()
 
     def generate_layers(self) -> None:
+        """Instantiate all constrained linear blocks for the residual stack."""
         self.A = FirstLipschitzLinearLayer(in_features=self.in_features, out_features=self.out_features,
                                            constant_sq=self.lipschitz_constant_sq, enable_alpha=self.enable_alpha,
                                            **self.factory_kwargs)
@@ -81,7 +85,9 @@ class DeepLipschitzLinearResNet(nn.Module):
 
         # self.spectral_norm = SpectralNorm(self.B.identity)
 
-    def compute_b(self, x: Tensor, sigma_lower: Tensor, a_weight: Tensor, prev_alpha: Tensor, prev_omega_r: Tensor):
+    def compute_b(self, x: Tensor, sigma_lower: Tensor, a_weight: Tensor, prev_alpha: Tensor,
+                  prev_omega_r: Tensor) -> Tuple[Tensor, Tensor]:
+        """Compute the terminal branch contribution for ``x`` shaped ``(batch, d)``."""
         # inner_inverse = torch.cholesky_inverse(prev_r, upper=True)
         # max_singular = torch.sqrt(2 * self.spectral_norm(inner_inverse))
 
@@ -95,7 +101,8 @@ class DeepLipschitzLinearResNet(nn.Module):
 
         return second, b_weight
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: Tensor) -> Tensor:
+        """Run the residual Lipschitz block on ``x`` with shape ``(batch, in_features)``."""
         first, a_weight, d_inv, prev_alpha, prev_omega_r, prev_constant = self.A(x)
 
         gamma = self.A.identity
@@ -147,6 +154,7 @@ class DeepLipschitzLinearResNet(nn.Module):
 
 
 class DeepLipschitzSequential(nn.Module):
+    """Feed-forward Lipschitz network composed of parametrized linear blocks."""
     layers: ModuleList
 
     def __init__(self, in_features: int, out_features: int, layers_widths: Sequence[int],
@@ -184,6 +192,7 @@ class DeepLipschitzSequential(nn.Module):
             layer.reset_parameters()
 
     def generate_layers(self) -> None:
+        """Instantiate the linear/dropout blocks that form the sequential model."""
         layer = []
 
         prev = self.in_features
@@ -205,7 +214,8 @@ class DeepLipschitzSequential(nn.Module):
 
         self.layers = ModuleList(layer)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: Tensor) -> Tensor:
+        """Evaluate the sequential model for ``x`` shaped ``(batch, in_features)``."""
         current_input = x
         d_sqrt = self.lipschitz_constant * self.layers[0].identity
         prev_alpha = torch.tensor(1.0, **self.factory_kwargs)
@@ -224,7 +234,8 @@ class DeepLipschitzSequential(nn.Module):
 
         return current_input
 
-    def last_weight(self) -> Tuple[torch.Tensor, torch.Tensor]:
+    def last_weight(self) -> Tensor:
+        """Return the effective weight matrix shaped ``(out_features, hidden_L)``."""
         x = torch.zeros((1, self.in_features), **self.factory_kwargs)
 
         d_sqrt = self.lipschitz_constant * self.layers[0].identity
@@ -243,8 +254,21 @@ class DeepLipschitzSequential(nn.Module):
 
         return W
 
-    def calculate_lyapunov_spectrum(self, x_data, nle, n_random_samples: int = None,
-                                    normalization_frequency: int = None):
+    def calculate_lyapunov_spectrum(self, x_data: Tensor, nle: int, n_random_samples: Optional[int] = None,
+                                    normalization_frequency: Optional[int] = None) -> Tuple[Tensor, Tensor]:
+        """Estimate the Lyapunov spectrum via Oseledets' QR method.
+
+        Args:
+            x_data: Inputs with shape ``(batch, in_features)`` used to trace Jacobians.
+            nle: Number of Lyapunov exponents to track.
+            n_random_samples: Optional subsampling count for the batch dimension.
+            normalization_frequency: Frequency of QR re-orthogonalization.
+
+        Returns:
+            Tuple[Tensor, Tensor]: ``(exponents, outputs)`` where
+            ``exponents`` has shape ``(batch, nle)`` and ``outputs`` matches
+            the forward pass shape ``(batch, out_features)``.
+        """
 
         if normalization_frequency is None:
             # Normalize only once at the end
@@ -298,6 +322,7 @@ class DeepLipschitzSequential(nn.Module):
 
 
 class DeepLipschitzSequentialStack(nn.Module):
+    """Hierarchical stack of sequential Lipschitz networks."""
     def __init__(self, in_features: int, out_features: int, num_layers: int, num_interior_layers: int, num_hidden: int,
                  activation: Union[Module, List[Module]] = None, interior_activation: Optional[Module] = None,
                  lipschitz_constant: float = 1.0,
@@ -332,6 +357,7 @@ class DeepLipschitzSequentialStack(nn.Module):
         self.generate_layers()
 
     def generate_layers(self):
+        """Instantiate the outer stack of sequential models."""
         model = []
 
         prev = self.in_features
@@ -352,5 +378,6 @@ class DeepLipschitzSequentialStack(nn.Module):
 
         self.layers = nn.Sequential(*model)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: Tensor) -> Tensor:
+        """Evaluate the stacked network end-to-end for ``x`` shaped ``(batch, in_features)``."""
         return self.layers(x)

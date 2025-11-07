@@ -1,3 +1,5 @@
+"""Reference implementation of curvature-regularized gradient flossing."""
+
 import os
 import random
 
@@ -13,6 +15,7 @@ DPI = 600
 
 
 def set_seed(seed):
+    """Seed Python, NumPy, and PyTorch RNGs for reproducibility."""
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     np.random.seed(seed)
@@ -20,6 +23,7 @@ def set_seed(seed):
 
 
 def tree_flatten(params_dict):
+    """Flatten a parameter dict into a single vector plus metadata."""
     names, shapes, chunks = [], [], []
     for n, t in params_dict.items():
         names.append(n)
@@ -31,6 +35,7 @@ def tree_flatten(params_dict):
 
 
 def tree_unflatten(vec, meta):
+    """Recreate a parameter dict from :func:`tree_flatten` metadata."""
     names, shapes, numels = meta
     out, i = {}, 0
     for n, s, m in zip(names, shapes, numels):
@@ -40,16 +45,19 @@ def tree_unflatten(vec, meta):
 
 
 class Linear(nn.Linear):
+    """Linear layer with a ReLU activation for the corrected demo."""
     def __init__(self, in_features: int, out_features: int, bias: bool = True, device=None, dtype=None):
         super().__init__(in_features, out_features, bias, device, dtype)
         self.activation = nn.ReLU()
 
     def forward(self, x):
+        """Forward pass consisting of ``Wx + b`` followed by ReLU."""
         linear_out = super().forward(x)
         return self.activation(linear_out)
 
 
 class Network(nn.Module):
+    """Stack of linear layers tracked for Hessian/ONS diagnostics."""
     def __init__(self, Nin, n_hidden, hidden_dim, Nout, device=None, dtype=None):
         super().__init__()
         self.dtype = dtype
@@ -72,6 +80,7 @@ class Network(nn.Module):
         self.model = nn.Sequential(*modules)
 
     def forward(self, x):
+        """Apply the sequential model."""
         return self.model(x)
 
     def __len__(self):
@@ -81,15 +90,23 @@ class Network(nn.Module):
 def train_loop(model, optimizer, num_steps, k, dataloader, device,
                nstepONS,
                curv_coeff=1e-3, nStepTransient=100, enable_flossing=False, train_flossing=False):
-    """
-    Curvature-regularized training.
-    - Uses k-column block Q (state, no grads across steps).
-    - JQ = Q - eta * (H @ Q), with H@Q computed via k HVPs (batched by vmap).
-    - QR factorization of JQ yields R; local Lyapunov exponents ~ log|diag(R)| / (nstepONS*eta).
-    - Penalize positive exponents (pushes toward stable parameter dynamics).
+    """Train with curvature regularization and optional Lyapunov penalties.
 
-    curv_coeff: strength of the curvature penalty.
-    nStepTransient: start regularization after this many steps.
+    Args:
+        model: Network under training.
+        optimizer: Optimizer used for parameter updates.
+        num_steps: Number of epochs (outer loops) to execute.
+        k: Number of Lyapunov directions to track.
+        dataloader: Provides training batches.
+        device: Device where computations run.
+        nstepONS: Frequency of orthogonalization.
+        curv_coeff: Strength of the curvature penalty term.
+        nStepTransient: Number of steps to skip before enabling flossing.
+        enable_flossing: Whether to evaluate Lyapunov exponents.
+        train_flossing: Whether Lyapunov losses contribute gradients.
+
+    Returns:
+        dict: Aggregated losses, Lyapunov spectra, and intermediate states.
     """
 
     model.train()
@@ -262,6 +279,7 @@ def train_loop(model, optimizer, num_steps, k, dataloader, device,
 
 
 def main():
+    """Entry point for reproducing the corrected linear flossing experiment."""
     set_seed(42)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 

@@ -1,3 +1,5 @@
+"""Plotting and analysis utilities for the Lipschitz LMI verification."""
+
 import os.path
 from typing import Optional, Sequence, List
 
@@ -22,10 +24,12 @@ OUTPUT_FORMAT = 'png'
 
 
 def block(tensors: Sequence[Sequence[torch.Tensor]]) -> torch.Tensor:
+    """Assemble a block matrix from a nested sequence of tensors."""
     return torch.cat([torch.cat(b, dim=-1) for b in tensors], dim=-2)
 
 
 def E_real(dimensions: Sequence[int], i: Optional[int], device=None, dtype=None):
+    """Construct selection matrices that extract consecutive block rows."""
     Dn = sum(dimensions)
 
     factory_kwargs = dict(device=device, dtype=dtype)
@@ -54,6 +58,7 @@ def E_real(dimensions: Sequence[int], i: Optional[int], device=None, dtype=None)
 
 def main_real(A: torch.Tensor, B: torch.Tensor, Cs: List[torch.Tensor], Ls: List[torch.Tensor], Lms, dimensions,
               device=None):
+    """Assemble the full Lipschitz LMI matrix from its components."""
     L = len(Ls)
 
     factory_kwargs = dict(device=device, dtype=A.dtype)
@@ -107,6 +112,7 @@ def main_real(A: torch.Tensor, B: torch.Tensor, Cs: List[torch.Tensor], Ls: List
 
 
 def extract_lmi_constants_deep_resnet_new(model: DeepLipschitzLinearResNet):
+    """Extract the matrices needed to assemble the LMI for the ResNet."""
     x = torch.zeros((1, model.in_features), **model.factory_kwargs)
 
     first, a_weight, d_inv, prev_alpha, prev_omega_r, prev_constant = model.A(x)
@@ -149,6 +155,7 @@ def extract_lmi_constants_deep_resnet_new(model: DeepLipschitzLinearResNet):
 
 
 def extract_lmi_constants_deep_linear(model: DeepLipschitzSequential):
+    """Extract the LMI building blocks for the sequential network."""
     x = torch.zeros((1, model.in_features), **model.factory_kwargs)
 
     current_input = x
@@ -186,6 +193,7 @@ def extract_lmi_constants_deep_linear(model: DeepLipschitzSequential):
 
 
 def extract_lmi_constants(model):
+    """Dispatch to the proper extractor based on the model type."""
     if isinstance(model, DeepLipschitzLinearResNet):
         return extract_lmi_constants_deep_resnet_new(model)
     else:

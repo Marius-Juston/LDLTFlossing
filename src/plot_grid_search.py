@@ -1,3 +1,5 @@
+"""Visualization helpers for summarizing grid-search experiments."""
+
 import json
 from pathlib import Path
 
@@ -8,11 +10,21 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from matplotlib.lines import Line2D
+from typing import Any, Callable, Dict, Iterable, List, Tuple
 
 DPI = 600
 
 
-def load_grid_results(base_dir='../runs/grid_search'):
+def load_grid_results(base_dir: str = '../runs/grid_search') -> pd.DataFrame:
+    """Load per-run metadata into a tidy dataframe.
+
+    Args:
+        base_dir: Directory that contains ``index.json`` and run folders.
+
+    Returns:
+        pandas.DataFrame: One row per successful configuration with the best
+        loss, structural parameters, and model size.
+    """
     base = Path(base_dir)
     index_path = base / 'index.json'
 
@@ -47,7 +59,20 @@ def load_grid_results(base_dir='../runs/grid_search'):
     return df
 
 
-def load_runs(base_dir: Path):
+def load_runs(base_dir: Path) -> List[Dict[str, Any]]:
+    """Load every successful training run as a list of dictionaries.
+
+    Args:
+        base_dir: Directory containing ``index.json``.
+
+    Returns:
+        list[dict]: Metadata dictionaries with losses, model sizes, and
+        Lyapunov statistics for each run that finished successfully.
+
+    Raises:
+        FileNotFoundError: If ``index.json`` does not exist.
+        RuntimeError: If no successful run is discovered.
+    """
     index_path = base_dir / "index.json"
     if not index_path.exists():
         raise FileNotFoundError(f"index.json not found at {index_path}")
@@ -98,16 +123,19 @@ def load_runs(base_dir: Path):
     return runs
 
 
-def _compute_group_means(runs, key, group_fn):
-    """
-    Compute two mean curves (success, fail) for a given lyapunov key.
-    - runs: list of run dicts
-    - key: e.g. "running_lyapunov_exponents" or "conditional_lyaponov_exponents"
-    - group_fn: function(run) -> True if success, False otherwise
+def _compute_group_means(runs: Iterable[Dict[str, Any]],
+                         key: str,
+                         group_fn: Callable[[Dict[str, Any]], bool]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Compute split-mean curves for a ragged time series.
+
+    Args:
+        runs: Iterable of run dictionaries returned by :func:`load_runs`.
+        key: Name of the time-series entry to summarize.
+        group_fn: Callable deciding whether a run counts as *success*.
 
     Returns:
-        T_success, mean_success, T_fail, mean_fail
-        where each T_* is np.arange(1, len(mean_*)+1)
+        tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]: Time/value
+        arrays for successful and unsuccessful runs respectively.
     """
     # collect sequences
     success_seqs = []
@@ -150,22 +178,24 @@ def _compute_group_means(runs, key, group_fn):
     return T_success, mean_success, T_fail, mean_fail
 
 
-def is_success_run(run, threshold=0.2):
+def is_success_run(run: Dict[str, Any], threshold: float = 0.2) -> bool:
+    """Check whether a run converged below a desired loss threshold."""
     final_loss = run.get("final_loss", float("nan"))
     if np.isnan(final_loss):
         return False
     return final_loss < threshold
 
 
-def plot_all_runs(runs,
+def plot_all_runs(runs: Iterable[Dict[str, Any]],
                   out_base: Path,
-                  figsize=(9, 6),
-                  dpi=600,
-                  ylog=False,
-                  cmap_name="viridis_r",
-                  linewidth=1.0,
-                  alpha=0.9,
-                  network_size=False):
+                  figsize: Tuple[int, int] = (9, 6),
+                  dpi: int = 600,
+                  ylog: bool = False,
+                  cmap_name: str = "viridis_r",
+                  linewidth: float = 1.0,
+                  alpha: float = 0.9,
+                  network_size: bool = False) -> None:
+    """Plot training-loss curves (1-D per epoch) colored by depth/size."""
     # Prepare L range and colormap
     if network_size:
         L_values = sorted({r['model_size'] if 'model_size' in r else r["L"] * r['hidden'] for r in runs})
@@ -251,7 +281,9 @@ SUCCESS_COLOR = 'tab:green'
 FAIL_COLOR = 'tab:red'
 
 
-def plot_lyapunov_runs(runs, out_path: Path, title="Running Lyapunov exponents"):
+def plot_lyapunov_runs(runs: Iterable[Dict[str, Any]], out_path: Path,
+                       title: str = "Running Lyapunov exponents") -> None:
+    """Overlay per-step Lyapunov curves (1-D sequences) and highlight group means."""
     fig, ax = plt.subplots()
 
     # 1) plot all individual runs, faint
@@ -312,7 +344,9 @@ def plot_lyapunov_runs(runs, out_path: Path, title="Running Lyapunov exponents")
     print(f"Saved: {out_path}")
 
 
-def plot_conditional_lyapunov_runs(runs, out_path: Path, title="Conditional Lyapunov exponents"):
+def plot_conditional_lyapunov_runs(runs: Iterable[Dict[str, Any]], out_path: Path,
+                                   title: str = "Conditional Lyapunov exponents") -> None:
+    """Plot flossing-phase Lyapunov sequences keyed by ``conditional_lyaponov_exponents``."""
     fig, ax = plt.subplots()
 
     # 1) plot all individual runs, faint
@@ -367,7 +401,8 @@ def plot_conditional_lyapunov_runs(runs, out_path: Path, title="Conditional Lyap
     print(f"Saved: {out_path}")
 
 
-def parameter_plots(stacked=False, flossing=False):
+def parameter_plots(stacked: bool = False, flossing: bool = False) -> None:
+    """Generate publication-ready loss plots for a grid-search directory."""
     # === User-configurable ===
     path = "../runs/grid_search"
 
@@ -413,7 +448,8 @@ def parameter_plots(stacked=False, flossing=False):
     )
 
 
-def plot_grid_results(stacked=False, flossing=False, dpi=600):
+def plot_grid_results(stacked: bool = False, flossing: bool = False, dpi: int = 600) -> None:
+    """Create a heatmap of best losses across depth/width pairs."""
     foldeR_name = f'grid_search'
 
     if stacked:

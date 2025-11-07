@@ -1,8 +1,17 @@
+"""Linear-model utility functions and custom autograd helpers.
+
+This module hosts numerically robust matrix primitives, custom autograd
+operators, and helper layers used across the gradient-flossing experiments.
+Every function follows the same expectations: operate on PyTorch tensors,
+avoid silent device transfers, and preserve differentiability whenever
+possible.
+"""
+
 import logging
 import traceback
 import types
 import warnings
-from typing import Tuple, Optional, Any
+from typing import Tuple, Optional, Any, Iterable, Union
 
 import torch
 from torch import Tensor, cholesky_inverse
@@ -10,39 +19,81 @@ from torch.autograd import Function
 from torch.linalg import eigh
 
 
-@torch.autocast(device_type='cuda', enabled=False)
-def safe_cholesky(A: torch.Tensor, upper=False, eps=1e-3):
+def _project_to_spd(A: Tensor, eps: float) -> Tensor:
+    """Project a matrix or batch of matrices onto the SPD cone.
+
+    Args:
+        A: Tensor with shape ``(..., n, n)``.
+        eps: Minimum eigenvalue retained during the projection.
+
+    Returns:
+        Tensor: Symmetric positive definite tensor with the same leading
+        dimensions as ``A``.
+    """
     A32 = A.to(torch.float32)
-
-    res, info = torch.linalg.cholesky_ex(A32, upper=upper)
-
-    if info.any():
-        logging.warning("Cholesky failed:\n" + traceback.format_exc())
-
-        with torch.no_grad():
-            A_sym = (A32 + A32.mT) / 2
-            w, V = torch.linalg.eigh(A_sym)
-
-            w_clamped = torch.clamp(w, min=eps)
-
-            D = torch.diag_embed(w_clamped)
-
-            B_pos = V.matmul(D).matmul(V.mT)
-
-            A.data = B_pos.data.to(A.dtype)
-
-            res, info = torch.linalg.cholesky_ex(B_pos, upper=upper)
-
-        if info.any():
-            logging.error("eigh failed:\n" + traceback.format_exc())
-
-            raise ValueError("Unable to perform Cholesky.")
-
-    return res.to(A.dtype) if A.dtype != torch.float32 else res
+    A_sym = (A32 + A32.mT) / 2
+    eigvals, eigvecs = torch.linalg.eigh(A_sym)
+    eigvals = torch.clamp(eigvals, min=eps)
+    return eigvecs @ torch.diag_embed(eigvals) @ eigvecs.mT
 
 
 @torch.autocast(device_type='cuda', enabled=False)
-def amp_solve_triangular(A, B, **kwargs):
+def safe_cholesky(A: Tensor, upper: bool = False, eps: float = 1e-4, max_tries: int = 5) -> Tensor:
+    """Retry ``torch.linalg.cholesky_ex`` with spectral projections and jitter.
+
+    Args:
+        A: Hermitian positive semidefinite tensor with shape ``(..., n, n)``.
+        upper: Whether to return an upper-triangular factor.
+        eps: Minimum eigenvalue retained during spectral projection.
+        max_tries: Number of jitter trials attempted before raising.
+
+    Returns:
+        Tensor: Triangular factor with the same dtype as ``A``.
+
+    Raises:
+        ValueError: If no stabilization strategy succeeds.
+    """
+    A32 = A.to(torch.float32)
+    res, info = torch.linalg.cholesky_ex(A32, upper=upper)
+    if not info.any():
+        return res.to(A.dtype)
+
+    logging.warning("Cholesky failed, retrying with spectral projection.")
+    projected = _project_to_spd(A32, eps)
+    res, info = torch.linalg.cholesky_ex(projected, upper=upper)
+    if not info.any():
+        return res.to(A.dtype)
+
+    identity = torch.eye(A32.shape[-1], dtype=A32.dtype, device=A32.device)
+    for attempt in range(max_tries):
+        jitter = eps * (10 ** attempt)
+        try:
+            chol = torch.linalg.cholesky(projected + jitter * identity, upper=upper)
+            return chol.to(A.dtype)
+        except RuntimeError:
+            logging.error(
+                "Cholesky retry %s failed with jitter %.2e:\n%s",
+                attempt,
+                jitter,
+                traceback.format_exc(),
+            )
+
+    raise ValueError("Unable to produce a numerically stable Cholesky factor.")
+
+
+@torch.autocast(device_type='cuda', enabled=False)
+def amp_solve_triangular(A: Tensor, B: Tensor, **kwargs) -> Tensor:
+    """Solve a triangular system without enabling AMP for stability.
+
+    Args:
+        A: Triangular tensor with shape ``(..., n, n)``.
+        B: Right-hand side tensor with shape ``(..., n, k)``.
+        **kwargs: Keyword arguments forwarded to
+            :func:`torch.linalg.solve_triangular` (``upper``, ``left``, etc.).
+
+    Returns:
+        Tensor: Solution tensor cast back to ``A``'s dtype.
+    """
     A32 = A.to(torch.float32)
     B32 = B.to(torch.float32)
 
@@ -53,24 +104,43 @@ def amp_solve_triangular(A, B, **kwargs):
 
 # @torch.compile
 def matrix_inv_square_root(x: Tensor) -> Tensor:
-    """
-    Returns the Matrix's square root inverse x**(-1/2), detaches matrix so that gradients do not cause problems close to 0
-    :param x: Matrix to square root inverse
-    :return: The inverse square root of x
+    """Return the symmetric inverse square root of ``x``.
+
+    The input is detached before the eigen decomposition so gradients do not
+    explode near zero eigenvalues. This is sufficient for all current call
+    sites that only need the value, not the gradient, of the inverse square
+    root.
+
+    Args:
+        x: Hermitian positive definite tensor with shape ``(..., n, n)``.
+
+    Returns:
+        Tensor: Symmetric inverse square root ``S`` such that
+        ``S @ S`` approximates ``x.inv()``.
     """
     eigvals, eigvecs = eigh(x.detach())
     return (eigvecs * eigvals.rsqrt().unsqueeze(0)) @ eigvecs.T
 
 
-def matrix_inv_square_root_triangle(x: Tensor, B: Tensor = None, upper: bool = False, left: bool = True) -> Tensor:
-    """
-    Returns the Matrix's square root inverse x**(-1/2), detaches matrix so that gradients do not cause problems close to 0.
-    THIS IS NOT THE "UNIQUE" SYMMETRIC MATRIX INV SQUARE ROOT!!!
-    :param B:
-    :param upper:
-    :param left:
-    :param x: Matrix to square root inverse
-    :return: The inverse square root of x
+def matrix_inv_square_root_triangle(x: Tensor, B: Optional[Tensor] = None, upper: bool = False,
+                                    left: bool = True) -> Tensor:
+    """Return a triangular inverse square root obtained via Cholesky.
+
+    Unlike :func:`matrix_inv_square_root`, this helper keeps the triangular
+    factor returned by :func:`torch.linalg.cholesky_ex`. The result therefore is
+    not symmetric but is substantially cheaper to compute and differentiable by
+    construction.
+
+    Args:
+        x: Hermitian positive definite tensor with shape ``(..., n, n)``.
+        B: Optional right-hand side with shape ``(..., n, m)``. When ``None``
+            the routine solves ``L @ X = I`` and returns the inverse factor.
+        upper: Whether to treat the factor as an upper triangular matrix.
+        left: Whether to solve ``L @ X = B`` (``True``) or ``X @ L = B``.
+
+    Returns:
+        Tensor: Triangular inverse square root ``R`` such that
+        ``R.transpose(-1, -2) @ R`` approximates ``x.inv()``.
     """
     L = torch.linalg.cholesky_ex(x, upper=upper).L
 
@@ -81,15 +151,21 @@ def matrix_inv_square_root_triangle(x: Tensor, B: Tensor = None, upper: bool = F
 
 
 def symmetrize_(x: Tensor) -> Tensor:
+    """Return ``0.5 * (x + x.T)`` for tensors shaped ``(..., n, n)``."""
     return (x + x.T) / 2.0
 
 
 # @torch.compile
 def fast_symmetric_positive_definitive_matrix_inverse(x: Tensor) -> Tensor:
-    """
-    With the assumption that x is a symmetric positive definite (PSD) matrix, take the inverse of the matrix
-    :param x: The matrix to invert
-    :return: The inverse of the matrix
+    """Invert an SPD matrix using a single Cholesky factorization.
+
+    Args:
+        x: Symmetric positive definite tensor with shape ``(..., n, n)``.
+
+    Returns:
+        Tensor: Inverse of ``x`` computed via
+        :func:`torch.linalg.cholesky` followed by
+        :func:`torch.cholesky_inverse`.
     """
     L = torch.linalg.cholesky(x)
 
@@ -98,16 +174,16 @@ def fast_symmetric_positive_definitive_matrix_inverse(x: Tensor) -> Tensor:
 
 def get_largest_singular_value_power_iteration(matrix: Tensor, num_iterations: int = 25, v: Optional[Tensor] = None) -> \
         Tuple[Tensor, Tensor]:
-    """
-    Computes the largest singular value of a matrix using the Power Iteration method.
-    This is a classic and reliable iterative method.
+    """Approximate the dominant singular value via power iteration.
 
     Args:
-        matrix (torch.Tensor): The input matrix.
-        num_iterations (int): The number of iterations to run.
+        matrix: Input matrix with shape ``(m, n)`` or batch ``(..., m, n)``.
+        num_iterations: Number of power iterations to perform.
+        v: Optional initial vector with shape ``(n, 1)``; sampled when omitted.
 
     Returns:
-        float: The largest singular value.
+        Tuple[Tensor, Tensor]: Estimated singular value and the final
+        (unnormalized) dominant vector.
     """
     if v is None:
         v = torch.randn(matrix.shape[1], 1, device=matrix.device)
@@ -123,16 +199,17 @@ def get_largest_singular_value_power_iteration(matrix: Tensor, num_iterations: i
 
 
 class CholeskyRankKFunction(Function):
-    """
-    Inputs:
-      L : (n,n) lower-triangular Cholesky factor (A = LL^T)
-      M : (n,k) update matrix; A' = A + MM^T
-    Output:
-      Lp : (n,n) lower-triangular Cholesky factor of A'
+    """Differentiable rank-k update of a Cholesky factor.
+
+    Given a pre-factorized SPD matrix ``A = L L^T`` and a low-rank update
+    ``M M^T``, the forward path produces ``L'`` where ``A + M M^T = L' L'^T``.
+    The backward pass implements the analytical gradients derived for blocked
+    Cholesky updates and is safe to use inside ``torch.autograd``.
     """
 
     @staticmethod
-    def forward(L, M):
+    def forward(L: Tensor, M: Tensor) -> Tensor:
+        """Compute ``chol(L L^T + M M^T)`` while preserving gradients."""
         if L.ndim != 2 or L.shape[0] != L.shape[1]:
             raise ValueError("L must be square matrix (n,n)")
         if M.ndim != 2 or M.shape[0] != L.shape[0]:
@@ -148,7 +225,7 @@ class CholeskyRankKFunction(Function):
         return Lp
 
     @staticmethod
-    def setup_context(ctx: Any, inputs: tuple[Any, ...], output: Any) -> Any:
+    def setup_context(ctx: Any, inputs: tuple[Any, ...], output: Tensor) -> None:
         L, M = inputs
         Lp = output
 
@@ -157,7 +234,8 @@ class CholeskyRankKFunction(Function):
         ctx.Lp = Lp
 
     @staticmethod
-    def backward(ctx, grad_output):
+    def backward(ctx: Any, grad_output: Optional[Tensor]) -> tuple[Optional[Tensor], Optional[Tensor]]:
+        """Differentiate the rank-k update via the closed-form Jacobian."""
         if grad_output is None:
             return None, None
 
@@ -188,7 +266,8 @@ class CholeskyRankKFunction(Function):
         return grad_L, grad_M
 
     @staticmethod
-    def _rank_1_update(L: torch.Tensor, x: torch.Tensor):
+    def _rank_1_update(L: Tensor, x: Tensor) -> Tensor:
+        """Classical rank-1 update used internally by the forward pass."""
         n = x.shape[0]
 
         L = L.contiguous()
@@ -211,100 +290,71 @@ class CholeskyRankKFunction(Function):
         return L
 
 
-def cholesky_rank_k(L: torch.Tensor, M: torch.Tensor):
-    """
-    Wrapper to apply the custom Function; this is the user-facing call.
+def cholesky_rank_k(L: Tensor, M: Tensor) -> Tensor:
+    """User-facing wrapper for :class:`CholeskyRankKFunction`.
+
+    Args:
+        L: Lower-triangular factor with shape ``(n, n)``.
+        M: Rank-k update matrix with shape ``(n, k)``.
+
+    Returns:
+        Tensor: Updated Cholesky factor of ``A + M M^T``.
     """
     return CholeskyRankKFunction.apply(L, M)
 
 
 class PositiveExp(torch.nn.Module):
-    def __init__(self, eps=1e-4, device=None,
+    """Exponentiate unconstrained parameters to enforce positivity."""
+
+    def __init__(self, eps: float = 1e-4, device=None,
                  dtype=None) -> None:
         super().__init__()
         self.register_buffer("eps", torch.tensor(eps, dtype=dtype, device=device))
 
-    def forward(self, X: torch.Tensor) -> torch.Tensor:
-        # return X ** 2
+    def forward(self, X: Tensor) -> Tensor:
+        """Map unconstrained tensors ``X`` into ``exp(X) + eps``."""
         return X.exp() + self.eps
 
-    def right_inverse(self, A: torch.Tensor) -> torch.Tensor:
+    def right_inverse(self, A: Tensor) -> Tensor:
+        """Invert :meth:`forward` via ``log(A - eps)`` while matching shapes."""
         return (A - self.eps).log()
 
 
 class PositiveSq(torch.nn.Module):
+    """Square unconstrained parameters and shift them above zero."""
 
-    def __init__(self, eps=1e-4, device=None,
+    def __init__(self, eps: float = 1e-4, device=None,
                  dtype=None) -> None:
         super().__init__()
         self.register_buffer("eps", torch.tensor(eps, dtype=dtype, device=device))
 
-    def forward(self, X: torch.Tensor) -> torch.Tensor:
-        # return X ** 2
+    def forward(self, X: Tensor) -> Tensor:
+        """Return ``eps + X.square()`` preserving the input shape."""
         return self.eps + X.square()
 
-    def right_inverse(self, A: torch.Tensor) -> torch.Tensor:
+    def right_inverse(self, A: Tensor) -> Tensor:
+        """Undo :meth:`forward` through ``sqrt(A - eps)``."""
         return (A - self.eps).sqrt()
-
-
-def safe_cholesky(A: torch.Tensor, upper=False, eps=1e-4, max_tries=5):
-    res, info = torch.linalg.cholesky_ex(A, upper=upper)
-
-    if info.any():
-        A64 = A.to(torch.float64)
-
-        A_sym = (A64 + A64.mT) / 2
-
-        L, Q = torch.linalg.eigh(A_sym)
-
-        A_sym = torch.dist(Q @ torch.diag_embed(L).clamp(min=1e-4, max=1e3) @ Q.mT, A)
-
-        for i in range(0, max_tries):
-            try:
-                jitter = eps * (10 ** i)
-
-                return torch.linalg.cholesky(A_sym + jitter * torch.eye(A.size(-1), device=A.device, dtype=A.dtype),
-                                             upper=upper).to(A.dtype)
-            except RuntimeError:
-                logging.error(f"Chokesy failed (trial {i}: {eps}): {traceback.format_exc()}")
-
-        raise ValueError(f"Unable to perform Cholesky.\n{'\n'.join(traceback.format_stack())}")
-
-    return res
 
 
 @torch.no_grad()
 def weight_grad_norm_normalization_(
-        parameters,
+        parameters: Union[Iterable[Tensor], Tensor],
         norm_type: float = 2.0,
         error_if_nonfinite: bool = False,
         foreach: Optional[bool] = None,
-):
-    r"""Clip the gradient norm of an iterable of parameters.
-
-    The norm is computed over the norms of the individual gradients of all parameters,
-    as if the norms of the individual gradients were concatenated into a single vector.
-    Gradients are modified in-place.
-
-    This function is equivalent to :func:`torch.nn.utils.get_total_norm` followed by
-    :func:`torch.nn.utils.clip_grads_with_norm_` with the ``total_norm`` returned by ``get_total_norm``.
+) -> list[float]:
+    """Normalize gradients so each parameter block has unit norm.
 
     Args:
-        parameters (Iterable[Tensor] or Tensor): an iterable of Tensors or a
-            single Tensor that will have gradients normalized
-        max_norm (float): max norm of the gradients
-        norm_type (float, optional): type of the used p-norm. Can be ``'inf'`` for
-            infinity norm. Default: 2.0
-        error_if_nonfinite (bool, optional): if True, an error is thrown if the total
-            norm of the gradients from :attr:`parameters` is ``nan``,
-            ``inf``, or ``-inf``. Default: False
-        foreach (bool, optional): use the faster foreach-based implementation.
-            If ``None``, use the foreach implementation for CUDA and CPU native tensors and silently
-            fall back to the slow implementation for other device types.
-            Default: ``None``
+        parameters: Iterable of tensors (or a single tensor) whose gradients
+            will be normalized in-place. Each tensor can have arbitrary shape.
+        norm_type: P-norm applied to each gradient tensor.
+        error_if_nonfinite: Whether to raise if any gradient norm is NaN/Inf.
+        foreach: Whether to use the foreach implementations when available.
 
     Returns:
-        Total norm of the parameter gradients (viewed as a single vector).
+        list[float]: Collected norms for every gradient that was normalized.
     """
     if isinstance(parameters, torch.Tensor):
         parameters = [parameters]
