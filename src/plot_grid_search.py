@@ -291,16 +291,16 @@ def plot_lyapunov_runs(runs, out_path: Path, title="Running Lyapunov exponents")
         Line2D([0], [0], color=FAIL_COLOR, lw=1., alpha=0.1, label="No learning"),
     ]
     # add mean lines (only if they exist)
-    if mean_s.size:
-        line_mean_s, = ax.plot(T_s, mean_s, color=SUCCESS_COLOR, linewidth=2.0, alpha=1.0,
-                               label=r"Converged mean (loss $\approx 0$)")
-
-        legend_elems.append(line_mean_s)
-    if mean_f.size:
-        line_mean_f, = ax.plot(T_f, mean_f, color=FAIL_COLOR, linewidth=2.0, alpha=1.0,
-                               label="No learning mean")
-
-        legend_elems.append(line_mean_f)
+    # if mean_s.size:
+    #     line_mean_s, = ax.plot(T_s, mean_s, color=SUCCESS_COLOR, linewidth=2.0, alpha=1.0,
+    #                            label=r"Converged mean (loss $\approx 0$)")
+    #
+    #     legend_elems.append(line_mean_s)
+    # if mean_f.size:
+    #     line_mean_f, = ax.plot(T_f, mean_f, color=FAIL_COLOR, linewidth=2.0, alpha=1.0,
+    #                            label="No learning mean")
+    #
+    #     legend_elems.append(line_mean_f)
 
     ax.legend(handles=legend_elems, loc='lower left')
 
